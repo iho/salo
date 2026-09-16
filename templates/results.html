@@ -1,9 +1,19 @@
 {% if releases.is_empty() %}
   <p>No results for &ldquo;{{ query }}&rdquo;.</p>
 {% else %}
+  <p>{{ total_results }} results &middot; page {{ page }} of {{ total_pages }}</p>
   <table>
     <thead>
-      <tr><th>Title</th><th>Indexer</th><th>Size</th><th>Seeders</th><th>Leechers</th><th></th></tr>
+      <tr>
+        {% for col in columns %}
+          <th>
+            <a href="{{ col.href }}" hx-get="{{ col.href }}" hx-target="#results" hx-push-url="true">
+              {{ col.label }} {{ col.arrow }}
+            </a>
+          </th>
+        {% endfor %}
+        <th></th>
+      </tr>
     </thead>
     <tbody>
       {% for r in releases %}
@@ -23,4 +33,14 @@
       {% endfor %}
     </tbody>
   </table>
+
+  <div class="pagination">
+    {% if has_prev %}
+      <a href="{{ prev_href }}" hx-get="{{ prev_href }}" hx-target="#results" hx-push-url="true">&laquo; Prev</a>
+    {% endif %}
+    <span>Page {{ page }} / {{ total_pages }}</span>
+    {% if has_next %}
+      <a href="{{ next_href }}" hx-get="{{ next_href }}" hx-target="#results" hx-push-url="true">Next &raquo;</a>
+    {% endif %}
+  </div>
 {% endif %}

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let torrents = Arc::new(TorrentEngine::new(download_dir).await?);
     let state = Arc::new(AppState {
         http: reqwest::Client::builder()
-            .user_agent("arrmonolith/0.1")
+            .user_agent("salo/0.1")
             .build()?,
         torrents,
     });
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(routes::index))
         .route("/htmx.min.js", get(routes::htmx_js))
-        .route("/search", post(routes::search))
+        .route("/search", get(routes::search))
         .route("/watch", post(routes::watch))
         .route("/stream/{info_hash}/{file_id}", get(routes::stream))
         .with_state(state);

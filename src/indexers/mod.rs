@@ -53,14 +53,29 @@ impl Registered {
     }
 }
 
-/// Query every embedded indexer concurrently and merge the results.
+/// Names of every indexer compiled into this binary, for populating a
+/// "search this tracker" selector -- there's no registry to query at
+/// runtime, this is just the fixed list of what got built in.
+pub fn names() -> Vec<&'static str> {
+    Registered::ALL.iter().map(Registered::name).collect()
+}
+
+/// Query the embedded indexers concurrently and merge the results.
+/// `only` restricts the search to a single named indexer (used when the
+/// user picks one tracker instead of "all") so we don't pay for requests
+/// to sites the result set will just filter back out.
 ///
 /// One indexer being unreachable or returning unparseable HTML (sites
 /// change their markup) doesn't fail the whole search -- it's logged and
 /// skipped, same as a multi-indexer aggregator would treat a dead site.
-pub async fn search_all(client: &reqwest::Client, query: &str) -> Vec<Release> {
+pub async fn search_all(client: &reqwest::Client, query: &str, only: Option<&str>) -> Vec<Release> {
+    let targets: Vec<&Registered> = Registered::ALL
+        .iter()
+        .filter(|i| only.is_none_or(|name| i.name() == name))
+        .collect();
+
     let results = futures_util::future::join_all(
-        Registered::ALL
+        targets
             .iter()
             .map(|indexer| async move { (indexer.name(), indexer.search(client, query).await) }),
     )
@@ -73,9 +88,30 @@ pub async fn search_all(client: &reqwest::Client, query: &str) -> Vec<Release> {
             Err(err) => tracing::warn!(indexer = name, error = ?err, "indexer search failed"),
         }
     }
-
-    // Best releases first: more seeders means faster, more reliable
-    // sequential streaming.
-    releases.sort_by_key(|r| std::cmp::Reverse(r.seeders));
     releases
+}
+
+/// Best-effort size parse (`"4.7 GB"`, `"650 MiB"`, ...) for sorting by
+/// size across indexers that each format it as free-text. Unparseable
+/// sizes sort as zero rather than failing the request.
+pub fn size_bytes(size: &str) -> f64 {
+    let (num, unit) = size
+        .trim()
+        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != ',')
+        .map_or((size.trim(), ""), |i| size.trim().split_at(i));
+
+    let num: f64 = match num.replace(',', "").parse() {
+        Ok(n) => n,
+        Err(_) => return 0.0,
+    };
+
+    let mult = match unit.trim().to_uppercase().as_str() {
+        "B" | "" => 1.0,
+        "KB" | "KIB" => 1024.0,
+        "MB" | "MIB" => 1024.0f64.powi(2),
+        "GB" | "GIB" => 1024.0f64.powi(3),
+        "TB" | "TIB" => 1024.0f64.powi(4),
+        _ => 1.0,
+    };
+    num * mult
 }

@@ -6,13 +6,32 @@ use crate::indexers::Release;
 
 #[derive(Template)]
 #[template(path = "index.html")]
-pub struct IndexTemplate;
+pub struct IndexTemplate {
+    pub trackers: Vec<&'static str>,
+}
+
+/// One sortable column header: `href` already has the toggled sort/dir
+/// (and the current query/tracker/page=1) baked in, so the template just
+/// links to it -- no sort-toggling logic needed in Askama itself.
+pub struct ColumnSort {
+    pub label: &'static str,
+    pub href: String,
+    pub arrow: &'static str,
+}
 
 #[derive(Template)]
 #[template(path = "results.html")]
 pub struct ResultsTemplate {
     pub query: String,
     pub releases: Vec<Release>,
+    pub columns: Vec<ColumnSort>,
+    pub total_results: usize,
+    pub page: usize,
+    pub total_pages: usize,
+    pub has_prev: bool,
+    pub prev_href: String,
+    pub has_next: bool,
+    pub next_href: String,
 }
 
 #[derive(Template)]
