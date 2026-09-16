@@ -1,0 +1,26 @@
+{% if releases.is_empty() %}
+  <p>No results for &ldquo;{{ query }}&rdquo;.</p>
+{% else %}
+  <table>
+    <thead>
+      <tr><th>Title</th><th>Indexer</th><th>Size</th><th>Seeders</th><th>Leechers</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for r in releases %}
+        <tr>
+          <td>{{ r.title }}</td>
+          <td>{{ r.indexer }}</td>
+          <td>{{ r.size }}</td>
+          <td>{{ r.seeders }}</td>
+          <td>{{ r.leechers }}</td>
+          <td>
+            <form hx-post="/watch" hx-target="#player" hx-swap="innerHTML">
+              <input type="hidden" name="magnet" value="{{ r.magnet }}">
+              <button type="submit">Watch</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}

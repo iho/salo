@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>arrmonolith</title>
+  <script src="/htmx.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    form.search { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+    form.search input[type="text"] { flex: 1; padding: 0.5rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }
+    .htmx-indicator { display: none; opacity: 0.6; }
+    .htmx-request .htmx-indicator { display: inline; }
+    video { width: 100%; margin-bottom: 1.5rem; background: #000; }
+  </style>
+</head>
+<body>
+  <h1>arrmonolith</h1>
+
+  <form class="search" hx-post="/search" hx-target="#results" hx-swap="innerHTML">
+    <input type="text" name="q" placeholder="Search for a release..." required>
+    <button type="submit">Search</button>
+    <span class="htmx-indicator">searching…</span>
+  </form>
+
+  <div id="player"></div>
+  <div id="results"></div>
+</body>
+</html>

@@ -1,0 +1,6 @@
+<h2>{{ file_name }}</h2>
+<p>{{ file_len }} bytes &mdash; streaming sequentially from the swarm; playback starts as soon as the first pieces arrive.</p>
+<video controls autoplay>
+  <source src="/stream/{{ info_hash }}/{{ file_id }}">
+  Your browser does not support the video tag.
+</video>

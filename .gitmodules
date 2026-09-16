@@ -1,0 +1,3 @@
+[submodule "Prowlarr"]
+	path = Prowlarr
+	url = git@github.com:Prowlarr/Prowlarr.git
