@@ -1,0 +1,36 @@
+<h2>{{ name }}</h2>
+<p>Downloading in the background. See the <a href="/torrents/{{ info_hash }}">torrent's page</a>
+for its original tracker link and seed duration, or <a href="/torrents">manage all torrents</a>
+(including which directory it's saving to).</p>
+
+<table>
+  <thead>
+    <tr><th>File</th><th>Size</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for f in files %}
+      <tr>
+        <td><a href="/torrents/{{ info_hash }}">{{ f.name }}</a></td>
+        <td>{{ f.size }}</td>
+        <td>
+          {% if f.is_video %}
+            <details>
+              <summary>Watch</summary>
+              <video controls preload="none">
+                <source src="{{ f.stream_href }}">
+              </video>
+            </details>
+          {% else if f.is_audio %}
+            <details>
+              <summary>Listen</summary>
+              <audio controls preload="none">
+                <source src="{{ f.stream_href }}">
+              </audio>
+            </details>
+          {% endif %}
+          <a href="{{ f.download_href }}">Save</a>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>arrmonolith</title>
+  <title>SALO</title>
   <script src="/htmx.min.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
@@ -17,17 +17,21 @@
     .htmx-request .htmx-indicator { display: inline; }
     video { width: 100%; margin-bottom: 1.5rem; background: #000; }
     .pagination { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; }
+    form.open-form { display: flex; gap: 0.3rem; }
+    form.open-form input[type="text"] { width: 8rem; }
+    form.open-form input[type="number"] { width: 4.5rem; }
   </style>
 </head>
 <body>
-  <h1>arrmonolith</h1>
+  <p><a href="/torrents">Torrents</a> &middot; <a href="/settings">Settings</a></p>
+  <h1>SALO</h1>
 
   <form class="search" hx-get="/search" hx-target="#results" hx-swap="innerHTML" hx-push-url="true">
-    <input type="text" name="q" placeholder="Search for a release..." required>
+    <input type="text" name="q" placeholder="Search for a release..." value="{{ query }}" required>
     <select name="tracker">
-      <option value="all">All trackers</option>
+      <option value="all" {% if selected_tracker == "all" %}selected{% endif %}>All trackers</option>
       {% for t in trackers %}
-        <option value="{{ t }}">{{ t }}</option>
+        <option value="{{ t }}" {% if selected_tracker.as_str() == *t %}selected{% endif %}>{{ t }}</option>
       {% endfor %}
     </select>
     <button type="submit">Search</button>
@@ -35,6 +39,6 @@
   </form>
 
   <div id="player"></div>
-  <div id="results"></div>
+  <div id="results">{{ results_html|safe }}</div>
 </body>
 </html>

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SALO &middot; Torrents</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+    form.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
+    form.inline input[type="number"] { width: 4.5rem; }
+    p.hint { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&laquo; back to search</a></p>
+  <h1>Torrents</h1>
+  <p class="hint">
+    Removing a torrent stops seeding it; "also delete files" additionally
+    erases what was downloaded. A seed-time limit only takes effect once a
+    torrent finishes downloading, and never deletes the files themselves
+    -- it just stops seeding and removes it from this list.
+  </p>
+
+  {% if torrents.is_empty() %}
+    <p>No active torrents.</p>
+  {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Progress</th>
+          <th>Size</th>
+          <th>Uploaded</th>
+          <th>Saving to</th>
+          <th>Seed limit</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in torrents %}
+          <tr>
+            <td><a href="/torrents/{{ t.info_hash }}">{{ t.name }}</a></td>
+            <td>
+              {% if t.finished %}
+                done
+                {% if let Some(m) = t.seeded_for_minutes %}
+                  (seeding {{ m }}m)
+                {% endif %}
+              {% else %}
+                {{ t.progress_percent }}%
+              {% endif %}
+            </td>
+            <td>{{ t.total_size }}</td>
+            <td>{{ t.uploaded }}</td>
+            <td>{{ t.output_folder }}</td>
+            <td>
+              <form class="inline" method="post" action="/torrents/seed-limit">
+                <input type="hidden" name="info_hash" value="{{ t.info_hash }}">
+                <input type="number" name="seed_minutes" min="0" title="seed minutes (0 = indefinitely)" value="{{ t.seed_minutes }}">
+                <input type="number" name="seed_ratio" min="0" step="0.1" title="seed ratio (0 = indefinitely)" value="{{ t.seed_ratio }}">
+                <button type="submit">Set</button>
+              </form>
+            </td>
+            <td>
+              <form class="inline" method="post" action="/torrents/delete">
+                <input type="hidden" name="info_hash" value="{{ t.info_hash }}">
+                <label><input type="checkbox" name="delete_files" value="1"> also delete files</label>
+                <button type="submit">Remove</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</body>
+</html>

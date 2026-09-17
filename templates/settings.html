@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SALO &middot; Settings</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+    section { margin-bottom: 2rem; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 0.75rem; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }
+    form.add-setting { display: flex; gap: 0.5rem; }
+    form.add-setting input { flex: 1; padding: 0.4rem; }
+    p.hint { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&laquo; back to search</a></p>
+  <h1>Settings</h1>
+  <p class="hint">
+    Per-indexer configuration (API keys, tokens, etc.), stored locally in
+    SQLite. Nothing built into this binary currently requires any of
+    this -- it's here for indexer definitions that declare they need it.
+  </p>
+
+  {% for idx in indexers %}
+    <section>
+      <h2>{{ idx.name }}</h2>
+      {% if idx.entries.is_empty() %}
+        <p class="hint">No settings stored.</p>
+      {% else %}
+        <table>
+          <tbody>
+            {% for entry in idx.entries %}
+              <tr>
+                <td>{{ entry.key }}</td>
+                <td>{{ entry.value }}</td>
+                <td>
+                  <form method="post" action="/settings/delete">
+                    <input type="hidden" name="indexer" value="{{ idx.name }}">
+                    <input type="hidden" name="key" value="{{ entry.key }}">
+                    <button type="submit">Remove</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      <form class="add-setting" method="post" action="/settings">
+        <input type="hidden" name="indexer" value="{{ idx.name }}">
+        <input type="text" name="key" placeholder="key" required>
+        <input type="text" name="value" placeholder="value" required>
+        <button type="submit">Save</button>
+      </form>
+    </section>
+  {% endfor %}
+</body>
+</html>

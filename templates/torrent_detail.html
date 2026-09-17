@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SALO &middot; {{ name }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }
+    video, audio { width: 100%; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&laquo; back to search</a> &middot; <a href="/torrents">manage torrents</a></p>
+  <h1>{{ name }}</h1>
+  <p><code>{{ info_hash }}</code></p>
+
+  <p>
+    {% if let Some(url) = source_url %}
+      <a href="{{ url }}">View on original tracker &raquo;</a><br>
+    {% endif %}
+    {% if finished %}
+      Finished downloading.
+      {% if let Some(m) = seeded_for_minutes %}
+        Seeding for {{ m }} minutes.
+      {% endif %}
+    {% else %}
+      Downloading: {{ progress_percent }}% complete.
+    {% endif %}
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>File</th><th>Size</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for f in files %}
+        <tr>
+          <td>{{ f.name }}</td>
+          <td>{{ f.size }}</td>
+          <td>
+            {% if f.is_video %}
+              <details>
+                <summary>Watch</summary>
+                <video controls preload="none">
+                  <source src="{{ f.stream_href }}">
+                </video>
+              </details>
+            {% else if f.is_audio %}
+              <details>
+                <summary>Listen</summary>
+                <audio controls preload="none">
+                  <source src="{{ f.stream_href }}">
+                </audio>
+              </details>
+            {% endif %}
+            <a href="{{ f.download_href }}">Save</a>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

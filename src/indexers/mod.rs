@@ -9,11 +9,16 @@
 //! definition, just reimplemented here as compiled code. Adding a new site
 //! means adding a new module and a new `Registered` variant below.
 
+mod academic_torrents;
 mod generic_table;
 mod linuxtracker;
+mod public_domain_torrents;
+mod toloka;
 
 use anyhow::Result;
 use serde::Serialize;
+
+use crate::config_store::ConfigStore;
 
 /// A single parsed release row from an indexer's search results page.
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +29,10 @@ pub struct Release {
     pub leechers: u32,
     pub size: String,
     pub magnet: String,
+    /// The release's own page on the indexer's site, when the indexer
+    /// exposes one -- carried through to the torrent detail page as
+    /// "view on `<indexer>`", separate from the magnet/swarm itself.
+    pub source_url: Option<String>,
 }
 
 /// Every indexer compiled into this binary. Static dispatch (a plain enum)
@@ -33,22 +42,46 @@ pub struct Release {
 enum Registered {
     GenericTable,
     LinuxTracker,
+    AcademicTorrents,
+    PublicDomainTorrents,
+    Toloka,
 }
 
 impl Registered {
-    const ALL: &'static [Registered] = &[Registered::GenericTable, Registered::LinuxTracker];
+    const ALL: &'static [Registered] = &[
+        Registered::GenericTable,
+        Registered::LinuxTracker,
+        Registered::AcademicTorrents,
+        Registered::PublicDomainTorrents,
+        Registered::Toloka,
+    ];
 
     fn name(&self) -> &'static str {
         match self {
             Self::GenericTable => generic_table::NAME,
             Self::LinuxTracker => linuxtracker::NAME,
+            Self::AcademicTorrents => academic_torrents::NAME,
+            Self::PublicDomainTorrents => public_domain_torrents::NAME,
+            Self::Toloka => toloka::NAME,
         }
     }
 
-    async fn search(&self, client: &reqwest::Client, query: &str) -> Result<Vec<Release>> {
+    async fn search(
+        &self,
+        client: &reqwest::Client,
+        config: &ConfigStore,
+        query: &str,
+    ) -> Result<Vec<Release>> {
         match self {
             Self::GenericTable => generic_table::search(client, query).await,
             Self::LinuxTracker => linuxtracker::search(client, query).await,
+            Self::AcademicTorrents => academic_torrents::search(client, query).await,
+            Self::PublicDomainTorrents => public_domain_torrents::search(client, query).await,
+            // Toloka is login-walled: it reads its credentials/session
+            // cookie and its Freeleech-only / strip-Cyrillic toggles from
+            // the per-indexer settings store (see `toloka::search`'s doc
+            // comment for the keys it uses).
+            Self::Toloka => toloka::search(client, config, query).await,
         }
     }
 }
@@ -68,16 +101,21 @@ pub fn names() -> Vec<&'static str> {
 /// One indexer being unreachable or returning unparseable HTML (sites
 /// change their markup) doesn't fail the whole search -- it's logged and
 /// skipped, same as a multi-indexer aggregator would treat a dead site.
-pub async fn search_all(client: &reqwest::Client, query: &str, only: Option<&str>) -> Vec<Release> {
+pub async fn search_all(
+    client: &reqwest::Client,
+    config: &ConfigStore,
+    query: &str,
+    only: Option<&str>,
+) -> Vec<Release> {
     let targets: Vec<&Registered> = Registered::ALL
         .iter()
         .filter(|i| only.is_none_or(|name| i.name() == name))
         .collect();
 
     let results = futures_util::future::join_all(
-        targets
-            .iter()
-            .map(|indexer| async move { (indexer.name(), indexer.search(client, query).await) }),
+        targets.iter().map(|indexer| async move {
+            (indexer.name(), indexer.search(client, config, query).await)
+        }),
     )
     .await;
 
@@ -114,4 +152,18 @@ pub fn size_bytes(size: &str) -> f64 {
         _ => 1.0,
     };
     num * mult
+}
+
+/// Formats a byte count as a human-readable size (`"4.7 GB"`), the inverse
+/// of [`size_bytes`] -- shared so every indexer/route that has a raw byte
+/// count displays it the same way.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
 }

@@ -8,6 +8,15 @@ use crate::indexers::Release;
 #[template(path = "index.html")]
 pub struct IndexTemplate {
     pub trackers: Vec<&'static str>,
+    /// Pre-fills the search box and tracker selector, and embeds the
+    /// already-rendered results fragment -- used when `/search` is hit
+    /// as a direct navigation (a reload, a bookmark, a pasted link)
+    /// rather than an HTMX fragment swap, so that URL still renders a
+    /// complete, styled page instead of a bare `<table>`. Empty/"all" for
+    /// a plain `GET /`.
+    pub query: String,
+    pub selected_tracker: String,
+    pub results_html: String,
 }
 
 /// One sortable column header: `href` already has the toggled sort/dir
@@ -34,13 +43,71 @@ pub struct ResultsTemplate {
     pub next_href: String,
 }
 
+pub struct SettingEntry {
+    pub key: String,
+    pub value: String,
+}
+
+pub struct IndexerSettings {
+    pub name: &'static str,
+    pub entries: Vec<SettingEntry>,
+}
+
 #[derive(Template)]
-#[template(path = "player.html")]
-pub struct PlayerTemplate {
+#[template(path = "settings.html")]
+pub struct SettingsTemplate {
+    pub indexers: Vec<IndexerSettings>,
+}
+
+pub struct FileEntry {
+    pub name: String,
+    pub size: String,
+    pub is_video: bool,
+    pub is_audio: bool,
+    pub stream_href: String,
+    pub download_href: String,
+}
+
+#[derive(Template)]
+#[template(path = "open.html")]
+pub struct OpenTemplate {
     pub info_hash: String,
-    pub file_id: usize,
-    pub file_name: String,
-    pub file_len: u64,
+    pub name: String,
+    pub files: Vec<FileEntry>,
+}
+
+#[derive(Template)]
+#[template(path = "torrent_detail.html")]
+pub struct TorrentDetailTemplate {
+    pub info_hash: String,
+    pub name: String,
+    pub source_url: Option<String>,
+    pub finished: bool,
+    pub progress_percent: u32,
+    pub seeded_for_minutes: Option<u64>,
+    pub files: Vec<FileEntry>,
+}
+
+pub struct TorrentRow {
+    pub info_hash: String,
+    pub name: String,
+    pub output_folder: String,
+    pub finished: bool,
+    pub progress_percent: u32,
+    pub total_size: String,
+    pub uploaded: String,
+    /// Empty string when no limit of that kind is set (keeps the template
+    /// dead simple: just print the field, no `{% if %}` needed for the
+    /// input's `value` attribute).
+    pub seed_minutes: String,
+    pub seed_ratio: String,
+    pub seeded_for_minutes: Option<u64>,
+}
+
+#[derive(Template)]
+#[template(path = "torrents.html")]
+pub struct TorrentsTemplate {
+    pub torrents: Vec<TorrentRow>,
 }
 
 /// Adapts any Askama `Template` into an axum response, rendering to HTML

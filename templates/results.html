@@ -24,9 +24,15 @@
           <td>{{ r.seeders }}</td>
           <td>{{ r.leechers }}</td>
           <td>
-            <form hx-post="/watch" hx-target="#player" hx-swap="innerHTML">
+            <form hx-post="/open" hx-target="#player" hx-swap="innerHTML" class="open-form">
               <input type="hidden" name="magnet" value="{{ r.magnet }}">
-              <button type="submit">Watch</button>
+              {% if let Some(url) = r.source_url %}
+                <input type="hidden" name="source_url" value="{{ url }}">
+              {% endif %}
+              <input type="text" name="directory" value="downloads" placeholder="save dir">
+              <input type="number" name="seed_minutes" min="0" value="0" title="seed minutes (0 = indefinitely)">
+              <input type="number" name="seed_ratio" min="0" step="0.1" value="0" title="seed ratio (0 = indefinitely)">
+              <button type="submit">Open</button>
             </form>
           </td>
         </tr>

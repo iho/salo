@@ -96,6 +96,7 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
 
         let dn = utf8_percent_encode(&title, NON_ALPHANUMERIC);
         let magnet = format!("magnet:?xt=urn:btih:{hash}&dn={dn}");
+        let source_url = format!("https://linuxtracker.org/torrents/{hash}/");
 
         let seeders = extract_number(&row, &selectors.seeders);
         let leechers = extract_number(&row, &selectors.leechers);
@@ -112,6 +113,7 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
             leechers,
             size,
             magnet,
+            source_url: Some(source_url),
         });
     }
 

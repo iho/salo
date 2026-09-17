@@ -82,25 +82,27 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Release
         .await
         .with_context(|| format!("failed to read {NAME} response body"))?;
 
-    parse_results(&body)
+    parse_results(&body, &url)
 }
 
-fn parse_results(body: &str) -> Result<Vec<Release>> {
+fn parse_results(body: &str, page_url: &reqwest::Url) -> Result<Vec<Release>> {
     let selectors = RowSelectors::new()?;
     let document = Html::parse_document(body);
 
     let mut releases = Vec::new();
     for row in document.select(&selectors.row) {
-        let title = row
-            .select(&selectors.title)
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string());
+        let title_el = row.select(&selectors.title).next();
+        let title = title_el.map(|el| el.text().collect::<String>().trim().to_string());
         let Some(title) = title.filter(|t| !t.is_empty()) else {
             // Row didn't match the expected shape (e.g. an ad or header
             // row) -- the site's DOM inevitably drifts, so skip rather
             // than fail the whole search.
             continue;
         };
+        let source_url = title_el
+            .and_then(|el| el.value().attr("href"))
+            .and_then(|href| page_url.join(href).ok())
+            .map(|u| u.to_string());
 
         let magnet = row
             .select(&selectors.magnet_link)
@@ -128,6 +130,7 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
             leechers,
             size,
             magnet,
+            source_url,
         });
     }
 
