@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Site</title>
+    <style>
+        html[data-theme="light"] {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --muted: #666666;
+            --primary: #007AFF;
+            --border: #eaeaea;
+            --nav-bg: rgba(255, 255, 255, 0.8);
+        }
+
+        html[data-theme="dark"] {
+            --bg: #121212;
+            --text: #e5e5e5;
+            --muted: #a0a0a0;
+            --primary: #0A84FF;
+            --border: #2c2c2c;
+            --nav-bg: rgba(18, 18, 18, 0.8);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text);
+            background: var(--bg);
+            -webkit-font-smoothing: antialiased;
+            transition: background 0.3s ease, color 0.3s ease;
+        }
+
+        nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: var(--nav-bg);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 1.5rem;
+            height: 64px;
+        }
+
+        .logo {
+            font-weight: 700;
+            font-size: 1.2rem;
+            text-decoration: none;
+            color: var(--text);
+        }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 1.5rem;
+        }
+
+        .nav-links a {
+            text-decoration: none;
+            color: var(--muted);
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.2s;
+            cursor: pointer;
+        }
+
+        .nav-links a:hover, .nav-links a.active {
+            color: var(--primary);
+        }
+
+        #theme-toggle {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            z-index: 1000;
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.7rem;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            transition: transform 0.2s, background 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            text-transform: uppercase;
+        }
+
+        #theme-toggle:active {
+            transform: scale(0.9);
+        }
+
+        main {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        .page {
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .page.active {
+            display: block;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            letter-spacing: -0.02em;
+        }
+
+        p {
+            margin-bottom: 1.5rem;
+            color: var(--muted);
+        }
+
+        footer {
+            text-align: center;
+            padding: 4rem 0 2rem;
+            font-size: 0.8rem;
+            color: var(--muted);
+            border-top: 1px solid var(--border);
+            margin-top: 4rem;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 600px) {
+            h1 { font-size: 1.8rem; }
+            .nav-links { display: none; } /* Simplified for mobile */
+            .nav-right { gap: 0.5rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <nav>
+        <a href="#home" class="logo">Brand</a>
+        <div class="nav-right">
+            <div class="nav-links">
+                <a href="#home" class="nav-item active">Home</a>
+                <a href="#about" class="nav-item">About</a>
+                <a href="#contact" class="nav-item">Contact</a>
+            </div>
+            <button id="theme-toggle">Theme</button>
+        </div>
+    </nav>
+
+    <main>
+        <section id="home" class="page active">
+            <h1>Welcome Home</h1>
+            <p>This is a simple, mobile-friendly design served from a single HTML file. It uses a basic client-side router to switch between pages without reloading.</p>
+            <p>Everything is consistent, clean, and fast.</p>
+        </section>
+
+        <section id="about" class="page">
+            <h1>About Us</h1>
+            <p>We believe in simplicity and efficiency. This layout uses system fonts and a minimal color palette to ensure it looks great on any device.</p>
+            <p>No external dependencies, no heavy frameworks—just pure HTML, CSS, and JS.</p>
+        </section>
+
+        <section id="contact" class="page">
+            <h1>Contact</h1>
+            <p>Get in touch with us via email or social media. We'd love to hear from you!</p>
+            <p>Email: hello@example.com</p>
+        </section>
+    </main>
+
+    <footer>
+        &copy; 2026 Brand. All rights reserved.
+    </footer>
+
+    <script>
+        function navigate() {
+            var hash = window.location.hash || '#home';
+            
+            var pages = document.querySelectorAll('.page');
+            for (var i = 0; i < pages.length; i++) {
+                var page = pages[i];
+                page.classList.remove('active');
+                if ('#' + page.id === hash) {
+                    page.classList.add('active');
+                }
+            }
+
+            var links = document.querySelectorAll('.nav-item');
+            for (var j = 0; j < links.length; j++) {
+                var link = links[j];
+                link.classList.remove('active');
+                if (link.getAttribute('href') === hash) {
+                    link.classList.add('active');
+                }
+            }
+            window.scrollTo(0, 0);
+        }
+
+        function initTheme() {
+            var savedTheme = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            
+            document.getElementById('theme-toggle').addEventListener('click', function() {
+                var currentTheme = document.documentElement.getAttribute('data-theme');
+                var newTheme = currentTheme === 'light' ? 'dark' : 'light';
+                
+                document.documentElement.setAttribute('data-theme', newTheme);
+                localStorage.setItem('theme', newTheme);
+            });
+        }
+
+        window.addEventListener('hashchange', navigate);
+        window.addEventListener('load', function() {
+            navigate();
+            initTheme();
+        });
+    </script>
+</body>
+</html>
