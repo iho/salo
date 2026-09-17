@@ -24,15 +24,16 @@
           <td>{{ r.seeders }}</td>
           <td>{{ r.leechers }}</td>
           <td>
-            <form hx-post="/open" hx-target="#player" hx-swap="innerHTML" class="open-form">
+            {# The hidden inputs hold the release's data; the visible button
+               hands this whole form to the modal in `#open-dialog`. #}
+            <form class="open-form" onsubmit="return false">
+              <input type="hidden" name="indexer" value="{{ r.indexer }}">
               <input type="hidden" name="magnet" value="{{ r.magnet }}">
               {% if let Some(url) = r.source_url %}
                 <input type="hidden" name="source_url" value="{{ url }}">
               {% endif %}
-              <input type="text" name="directory" value="downloads" placeholder="save dir">
-              <input type="number" name="seed_minutes" min="0" value="0" title="seed minutes (0 = indefinitely)">
-              <input type="number" name="seed_ratio" min="0" step="0.1" value="0" title="seed ratio (0 = indefinitely)">
-              <button type="submit">Open</button>
+              <input type="hidden" name="title" value="{{ r.title }}">
+              <button type="button" hx-on:click="openDialogFrom(this)">Open</button>
             </form>
           </td>
         </tr>

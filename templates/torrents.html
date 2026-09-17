@@ -4,13 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SALO &middot; Torrents</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/theme.css">
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+    th, td { vertical-align: top; }
     form.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
     form.inline input[type="number"] { width: 4.5rem; }
-    p.hint { color: #666; font-size: 0.9rem; }
+    p.hint { font-size: 0.9rem; }
+    @media (max-width: 600px) {
+      table { display: block; overflow-x: auto; }
+    }
   </style>
 </head>
 <body>
@@ -75,5 +78,7 @@
       </tbody>
     </table>
   {% endif %}
+
+  <button id="theme-toggle" type="button">Theme</button>
 </body>
 </html>

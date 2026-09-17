@@ -51,6 +51,13 @@ Then open <http://localhost:3000>.
 - **Settings** (`/settings`) — a small embedded SQLite key/value store
   for per-indexer configuration (API keys, tokens, etc.), for indexer
   definitions that need one. Nothing ships requiring it by default.
+- **Dark / light theme** — every page carries a floating theme toggle
+  (bottom right). Light is the default; the choice persists in
+  `localStorage`, and with nothing chosen yet the OS/browser preference
+  applies (and keeps applying if you never pick one). The theme is
+  applied by an inline-in-`<head>` script before the first paint, so
+  there's no white flash on load. All colors come from CSS variables in
+  one shared stylesheet — see `static/theme.css`.
 
 ## Architecture
 
@@ -64,7 +71,8 @@ src/
   config_store.rs   embedded SQLite (rusqlite, bundled) settings store
   indexers/         one module per indexer, see below
 templates/          Askama .html templates
-static/             vendored htmx.min.js (compiled into the binary)
+static/             vendored htmx.min.js + theme.css/theme.js (compiled
+                    into the binary)
 ```
 
 Nothing here is a runtime-configured "point this at an indexer service"

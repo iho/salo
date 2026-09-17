@@ -5,13 +5,20 @@ for its original tracker link and seed duration, or <a href="/torrents">manage a
 
 <table>
   <thead>
-    <tr><th>File</th><th>Size</th><th></th></tr>
+    <tr><th>File</th><th>Size</th><th>Progress</th><th></th></tr>
   </thead>
   <tbody>
     {% for f in files %}
       <tr>
         <td><a href="/torrents/{{ info_hash }}">{{ f.name }}</a></td>
         <td>{{ f.size }}</td>
+        <td>
+          {% if let Some(p) = f.percent %}
+            {{ p }}%
+          {% else %}
+            starting&hellip;
+          {% endif %}
+        </td>
         <td>
           {% if f.is_video %}
             <details>

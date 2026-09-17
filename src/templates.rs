@@ -43,14 +43,40 @@ pub struct ResultsTemplate {
     pub next_href: String,
 }
 
+/// A stored key/value pair this app's code didn't declare -- legacy data
+/// from the old raw key/value editor, shown so it can still be removed.
 pub struct SettingEntry {
     pub key: String,
     pub value: String,
 }
 
+pub struct SettingFieldView {
+    /// The human label ("Username") -- `key` stays the storage key.
+    pub label: &'static str,
+    /// The storage key in the per-indexer config store.
+    pub key: &'static str,
+    /// `text`, `password`, or `checkbox` -- the `<input>` type.
+    pub input_type: &'static str,
+    /// Help/hint text rendered under the label.
+    pub help: &'static str,
+    /// The currently stored value (empty when unset).
+    pub value: String,
+    /// Checkbox state: checked now (stored value or the declared default).
+    pub checked: bool,
+    /// Whether the input type is a checkbox (template branching).
+    pub is_checkbox: bool,
+    /// Whether something is stored under this key (password fields show
+    /// "(set)" instead of the secret itself).
+    pub has_value: bool,
+}
+
 pub struct IndexerSettings {
     pub name: &'static str,
-    pub entries: Vec<SettingEntry>,
+    pub fields: Vec<SettingFieldView>,
+    /// Keys with stored values that this indexer doesn't declare --
+    /// legacy entries from the old raw key/value editor. Kept visible
+    /// (with a Remove button) so nothing silently disappears.
+    pub extra_entries: Vec<SettingEntry>,
 }
 
 #[derive(Template)]
@@ -62,6 +88,9 @@ pub struct SettingsTemplate {
 pub struct FileEntry {
     pub name: String,
     pub size: String,
+    /// Per-file download progress, 0-100 -- `None` when unknown (the
+    /// freshly-added `open` page has no stats snapshot yet).
+    pub percent: Option<u32>,
     pub is_video: bool,
     pub is_audio: bool,
     pub stream_href: String,

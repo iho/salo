@@ -10,6 +10,7 @@
 //! means adding a new module and a new `Registered` variant below.
 
 mod academic_torrents;
+mod archive_org;
 mod generic_table;
 mod linuxtracker;
 mod public_domain_torrents;
@@ -19,6 +20,31 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config_store::ConfigStore;
+
+/// A single declared settings field for one indexer: how the settings
+/// page renders an input for it and where its value is stored.
+#[derive(Debug, Clone)]
+pub struct SettingField {
+    /// Human label shown next to the input ("Username", "API key").
+    pub label: &'static str,
+    /// The storage key in the per-indexer config store -- what the
+    /// indexer's own code reads back (`toloka::KEY_USERNAME`, ...).
+    pub key: &'static str,
+    /// Input type on the settings page: text, password (masked),
+    /// or checkbox.
+    pub kind: SettingFieldKind,
+    /// One-line help/hint shown under the label.
+    pub help: &'static str,
+    /// Checked/`on` value for checkboxes when the setting is absent.
+    pub default_on: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingFieldKind {
+    Text,
+    Password,
+    Checkbox,
+}
 
 /// A single parsed release row from an indexer's search results page.
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +70,7 @@ enum Registered {
     LinuxTracker,
     AcademicTorrents,
     PublicDomainTorrents,
+    ArchiveOrg,
     Toloka,
 }
 
@@ -53,6 +80,7 @@ impl Registered {
         Registered::LinuxTracker,
         Registered::AcademicTorrents,
         Registered::PublicDomainTorrents,
+        Registered::ArchiveOrg,
         Registered::Toloka,
     ];
 
@@ -62,7 +90,19 @@ impl Registered {
             Self::LinuxTracker => linuxtracker::NAME,
             Self::AcademicTorrents => academic_torrents::NAME,
             Self::PublicDomainTorrents => public_domain_torrents::NAME,
+            Self::ArchiveOrg => archive_org::NAME,
             Self::Toloka => toloka::NAME,
+        }
+    }
+
+    /// The settings fields this indexer declares, rendered on the
+    /// settings page. Public indexers declare none -- an empty list
+    /// renders as "no configuration needed" rather than a raw key/value
+    /// editor inviting people to invent keys nothing reads.
+    fn settings_fields(&self) -> Vec<SettingField> {
+        match self {
+            Self::Toloka => toloka::settings_fields(),
+            _ => Vec::new(),
         }
     }
 
@@ -77,6 +117,7 @@ impl Registered {
             Self::LinuxTracker => linuxtracker::search(client, query).await,
             Self::AcademicTorrents => academic_torrents::search(client, query).await,
             Self::PublicDomainTorrents => public_domain_torrents::search(client, query).await,
+            Self::ArchiveOrg => archive_org::search(client, query).await,
             // Toloka is login-walled: it reads its credentials/session
             // cookie and its Freeleech-only / strip-Cyrillic toggles from
             // the per-indexer settings store (see `toloka::search`'s doc
@@ -91,6 +132,35 @@ impl Registered {
 /// runtime, this is just the fixed list of what got built in.
 pub fn names() -> Vec<&'static str> {
     Registered::ALL.iter().map(Registered::name).collect()
+}
+
+/// The settings fields a named indexer declares (empty for public
+/// indexers that need no configuration) -- what the settings page
+/// renders labeled inputs from.
+pub fn settings_fields(name: &str) -> Vec<SettingField> {
+    Registered::ALL
+        .iter()
+        .find(|i| i.name() == name)
+        .map(Registered::settings_fields)
+        .unwrap_or_default()
+}
+
+/// Fetches the .torrent bytes behind one of `indexer`'s download URLs
+/// when that URL needs an authenticated session (login-walled sites --
+/// a plain HTTP fetch of it returns a login page, so librqbit's own
+/// URL add can't work). Returns `Ok(None)` when the URL is fetchable
+/// without credentials (magnet links, public trackers) or the indexer
+/// is unknown.
+pub async fn download_torrent(
+    client: &reqwest::Client,
+    config: &ConfigStore,
+    indexer: &str,
+    download_url: &str,
+) -> Result<Option<bytes::Bytes>> {
+    match indexer {
+        "toloka" => Ok(Some(toloka::download_torrent(client, config, download_url).await?)),
+        _ => Ok(None),
+    }
 }
 
 /// Query the embedded indexers concurrently and merge the results.

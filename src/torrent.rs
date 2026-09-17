@@ -55,10 +55,16 @@ pub struct TorrentEngine {
     source_urls: Mutex<HashMap<String, String>>,
 }
 
+/// One file of an already-added torrent. `downloaded_bytes` is `None`
+/// right after `add` (no stats snapshot exists yet) and `Some` when read
+/// back through `files()`, so the detail page can show per-file progress.
+/// The value is capped at the file's length -- librqbit's chunk
+/// accounting can overshoot slightly at piece boundaries.
 pub struct TorrentFile {
     pub file_id: usize,
     pub name: String,
     pub len: u64,
+    pub downloaded_bytes: Option<u64>,
 }
 
 pub struct AddedTorrent {
@@ -121,19 +127,51 @@ impl TorrentEngine {
     /// file's bytes concurrently with that download, sequentially from
     /// wherever you start reading.
     pub async fn add(&self, magnet: &str, output_folder: Option<String>) -> Result<AddedTorrent> {
+        self.add_torrent(AddTorrent::from_url(magnet), output_folder)
+            .await
+    }
+
+    /// Same as [`add`] for a .torrent document already fetched into
+    /// memory -- for login-walled indexers whose download URLs need an
+    /// authenticated session that librqbit's own URL fetch can't carry.
+    pub async fn add_bytes(
+        &self,
+        bytes: bytes::Bytes,
+        output_folder: Option<String>,
+    ) -> Result<AddedTorrent> {
+        self.add_torrent(AddTorrent::from_bytes(bytes), output_folder)
+            .await
+    }
+
+    async fn add_torrent(
+        &self,
+        source: AddTorrent<'_>,
+        output_folder: Option<String>,
+    ) -> Result<AddedTorrent> {
         let opts = AddTorrentOptions {
             output_folder,
             ..Default::default()
         };
-        let response = self
-            .session
-            .add_torrent(AddTorrent::from_url(magnet), Some(opts))
-            .await
-            .context("failed to add magnet link")?;
 
-        let handle = response
-            .into_handle()
-            .context("magnet was list-only; nothing to download")?;
+        // The timeout has to cover `add_torrent` itself, not just the wait
+        // below: for a magnet, librqbit resolves the metadata from peers
+        // *inside* this call (`resolve_magnet`) and blocks until some peer
+        // answers or a tracker/DHT lookup gives up -- with no timeout of its
+        // own. A magnet no one is seeding therefore hung the HTTP request
+        // forever, so the browser sat on a spinner with no error, and the
+        // `wait_until_initialized` timeout below was never even reached.
+        let handle = tokio::time::timeout(METADATA_TIMEOUT, async {
+            let response = self
+                .session
+                .add_torrent(source, Some(opts))
+                .await
+                .context("failed to add torrent")?;
+            response
+                .into_handle()
+                .context("magnet was list-only; nothing to download")
+        })
+        .await
+        .context("timed out resolving torrent metadata (no peers responded)")??;
 
         tokio::time::timeout(METADATA_TIMEOUT, handle.wait_until_initialized())
             .await
@@ -152,6 +190,7 @@ impl TorrentEngine {
                         file_id,
                         name: f.relative_filename.to_string_lossy().into_owned(),
                         len: f.len,
+                        downloaded_bytes: None,
                     })
                     .collect::<Vec<_>>()
             })
@@ -165,7 +204,8 @@ impl TorrentEngine {
     }
 
     /// List the files of an already-added torrent, for the detail page --
-    /// same shape `add` returns, without re-adding or re-resolving it.
+    /// same shape `add` returns, plus each file's downloaded bytes so the
+    /// page can show a per-file percentage.
     pub fn files(&self, info_hash: &str) -> Result<Vec<TorrentFile>> {
         let idx = TorrentIdOrHash::parse(info_hash).context("invalid info hash")?;
         let handle = self
@@ -173,8 +213,11 @@ impl TorrentEngine {
             .get(idx)
             .with_context(|| format!("torrent {info_hash} is not active"))?;
 
+        // `file_progress` is indexed the same as `file_infos`, so the two
+        // are zipped into one row per file.
         handle
             .with_metadata(|m| {
+                let progress = handle.stats().file_progress;
                 m.file_infos
                     .iter()
                     .enumerate()
@@ -182,6 +225,7 @@ impl TorrentEngine {
                         file_id,
                         name: f.relative_filename.to_string_lossy().into_owned(),
                         len: f.len,
+                        downloaded_bytes: Some(progress.get(file_id).copied().unwrap_or(0).min(f.len)),
                     })
                     .collect::<Vec<_>>()
             })

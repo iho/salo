@@ -4,22 +4,45 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SALO</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/theme.css">
   <script src="/htmx.min.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    form.search { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
-    form.search input[type="text"] { flex: 1; padding: 0.5rem; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }
-    th a { color: inherit; text-decoration: none; }
-    th a:hover { text-decoration: underline; }
-    .htmx-indicator { display: none; opacity: 0.6; }
-    .htmx-request .htmx-indicator { display: inline; }
+    form.search { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; align-items: center; flex-wrap: wrap; }
+    form.search input[type="text"] { flex: 1; min-width: 12rem; padding: 0.5rem; }
+    /* The indicator always occupies its slot, just invisible when idle.
+       With `display: none` it left the flow while a search was running, so
+       the `flex: 1` input shrank and dragged the Search button ~90px left,
+       then snapped back when the request finished. */
+    .htmx-indicator { visibility: hidden; opacity: 0.6; white-space: nowrap; }
+    .htmx-request .htmx-indicator { visibility: visible; }
     video { width: 100%; margin-bottom: 1.5rem; background: #000; }
     .pagination { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; }
-    form.open-form { display: flex; gap: 0.3rem; }
-    form.open-form input[type="text"] { width: 8rem; }
-    form.open-form input[type="number"] { width: 4.5rem; }
+
+    /* Per-release "Open" form, shown in a modal instead of as a row of
+       inputs crammed into the results table (it used to widen the row and
+       force the table to scroll sideways on a phone). */
+    form.open-form { display: block; }
+    form.open-form label { display: block; margin-top: 0.75rem; font-weight: 600; font-size: 0.9rem; }
+    form.open-form input[type="text"],
+    form.open-form input[type="number"] { width: 100%; margin-top: 0.2rem; }
+    form.open-form .seed-fields { display: flex; gap: 0.5rem; }
+    form.open-form .actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem; }
+    form.open-form p.about { margin: 0 0 0.5rem; font-size: 0.9rem; }
+    #open-dialog p.error { margin: 0.75rem 0 0; color: #ff453a; font-size: 0.9rem; }
+    /* Only meaningful while the request is in flight: opening a magnet waits
+       on peers, which can take up to a minute (see METADATA_TIMEOUT). */
+    form.open-form p.open-status { display: none; margin: 0.75rem 0 0; color: var(--muted); font-size: 0.85rem; }
+    #open-dialog.htmx-request form.open-form p.open-status { display: block; }
+    #open-dialog.htmx-request form.open-form input,
+    #open-dialog.htmx-request form.open-form .actions button { pointer-events: none; opacity: 0.6; }
+    #open-dialog { width: min(30rem, calc(100vw - 2rem)); border: 1px solid var(--border);
+                   border-radius: 10px; padding: 1.25rem; background: var(--bg); color: var(--text); }
+    #open-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+    #open-dialog h2 { font-size: 1.1rem; margin-bottom: 0.25rem; padding-right: 3rem; }
+    form.close-form { position: absolute; top: 0.75rem; right: 0.75rem; margin: 0; }
+    form.close-form button { padding: 0.1rem 0.4rem; font-size: 0.85rem; }
+    .htmx-request button[type="submit"] { opacity: 0.6; }
   </style>
 </head>
 <body>
@@ -40,5 +63,44 @@
 
   <div id="player"></div>
   <div id="results">{{ results_html|safe }}</div>
+
+  {# A row's "Open" button fills this form from that release's hidden inputs
+     (see `static/open-dialog.js`) and shows it as a modal, so the seed/save
+     options no longer sit inside the results table. `HX-Request` still goes
+     out normally, so `/open` still returns just the file-list fragment for
+     the player div. #}
+  <dialog id="open-dialog" aria-labelledby="open-dialog-title">
+    <form method="dialog" class="close-form" aria-label="Close"><button type="submit">Close</button></form>
+    <div id="open-dialog-body"></div>
+  </dialog>
+
+  <template id="open-form-template">
+    <h2 id="open-dialog-title">Open torrent</h2>
+    <p class="about"></p>
+    <form hx-post="/open" hx-target="#player" hx-swap="innerHTML" hx-indicator="#open-dialog"
+          class="open-form" hx-on::after-request="openDialogAfterRequest(event)">
+      <label>Save to directory
+        <input type="text" name="directory" value="downloads" placeholder="downloads">
+      </label>
+      <label>Seed minutes <span class="help">(0 = indefinitely)</span>
+        <input type="number" name="seed_minutes" min="0" value="0">
+      </label>
+      <label>Seed ratio <span class="help">(0 = indefinitely)</span>
+        <input type="number" name="seed_ratio" min="0" step="0.1" value="0">
+      </label>
+      <div class="actions">
+        <button type="button" hx-on:click="openDialogClose()">Cancel</button>
+        <button type="submit">Open torrent</button>
+      </div>
+      <p class="open-status">
+        Looking for peers to fetch this torrent's metadata&hellip; this can take up
+        to a minute, and fails if nobody is seeding it.
+      </p>
+    </form>
+    <p class="error" hidden></p>
+  </template>
+
+  <script src="/open-dialog.js"></script>
+  <button id="theme-toggle" type="button">Theme</button>
 </body>
 </html>

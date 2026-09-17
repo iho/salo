@@ -15,8 +15,8 @@ use crate::error::AppError;
 use crate::indexers::{self, Release};
 use crate::templates::{
     ColumnSort, FileEntry, HtmlTemplate, IndexTemplate, IndexerSettings, OpenTemplate,
-    ResultsTemplate, SettingEntry, SettingsTemplate, TorrentDetailTemplate, TorrentRow,
-    TorrentsTemplate,
+    ResultsTemplate, SettingEntry, SettingFieldView, SettingsTemplate, TorrentDetailTemplate,
+    TorrentRow, TorrentsTemplate,
 };
 use crate::torrent::TorrentEngine;
 
@@ -49,10 +49,47 @@ pub async fn index() -> impl IntoResponse {
 /// a single dependency-free binary that also works fully offline/air-gapped.
 const HTMX_JS: &str = include_str!("../static/htmx.min.js");
 
+/// Theme tokens (`--bg`, `--text`, `--border`, ...) and the toggle button's
+/// styles, also vendored: light/dark differ only in the values under
+/// `:root` and `html[data-theme="dark"]`, so no template rule knows which
+/// theme is active.
+const THEME_CSS: &str = include_str!("../static/theme.css");
+
+/// Reads the saved theme (or the OS preference) and sets `data-theme`
+/// before first paint, plus wires up the toggle button. Loaded
+/// synchronously in every page's `<head>`, so a dark-theme user never sees
+/// a white flash while the page loads.
+const THEME_JS: &str = include_str!("../static/theme.js");
+
+/// Fills the `#open-dialog` modal from a result row's hidden inputs and
+/// closes it once `/open` succeeds -- see `static/open-dialog.js`.
+const OPEN_DIALOG_JS: &str = include_str!("../static/open-dialog.js");
+
 pub async fn htmx_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         HTMX_JS,
+    )
+}
+
+pub async fn theme_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        THEME_CSS,
+    )
+}
+
+pub async fn theme_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        THEME_JS,
+    )
+}
+
+pub async fn open_dialog_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        OPEN_DIALOG_JS,
     )
 }
 
@@ -230,6 +267,11 @@ where
 #[derive(Deserialize)]
 pub struct OpenForm {
     magnet: String,
+    /// Which indexer the magnet came from -- a login-walled indexer's
+    /// download URL needs the stored session to fetch its .torrent file,
+    /// which librqbit's plain URL fetch cannot do.
+    #[serde(default)]
+    indexer: Option<String>,
     /// The release's page on the indexer's site, if it had one -- kept
     /// alongside the torrent so its detail page can link back to it.
     #[serde(default)]
@@ -263,7 +305,20 @@ pub async fn open(
     Form(form): Form<OpenForm>,
 ) -> Result<impl IntoResponse, AppError> {
     let directory = form.directory.filter(|d| !d.is_empty());
-    let added = state.torrents.add(&form.magnet, directory).await?;
+
+    // Login-walled indexers (toloka) serve their .torrent files only to
+    // an authenticated session, so fetch the bytes here and add from
+    // those; everything else (magnet links, public .torrent URLs) goes
+    // through librqbit's own URL fetch as before.
+    let added = if let Some(indexer) = form.indexer.as_deref() {
+        match indexers::download_torrent(&state.http, &state.config, indexer, &form.magnet).await? {
+            Some(bytes) => state.torrents.add_bytes(bytes, directory).await?,
+            None => state.torrents.add(&form.magnet, directory).await?,
+        }
+    } else {
+        state.torrents.add(&form.magnet, directory).await?
+    };
+
     if form.source_url.is_some() {
         state.torrents.set_source_url(&added.info_hash, form.source_url);
     }
@@ -273,6 +328,8 @@ pub async fn open(
             .set_seed_limit(&added.info_hash, form.seed_minutes, form.seed_ratio);
     }
 
+    // Freshly added: librqbit has no stats snapshot yet, so there's no
+    // per-file progress to show.
     let files = to_file_entries(&added.info_hash, added.files);
 
     Ok(HtmlTemplate(OpenTemplate {
@@ -285,13 +342,26 @@ pub async fn open(
 fn to_file_entries(info_hash: &str, files: Vec<crate::torrent::TorrentFile>) -> Vec<FileEntry> {
     files
         .into_iter()
-        .map(|f| FileEntry {
-            is_video: crate::torrent::is_video_file(&f.name),
-            is_audio: crate::torrent::is_audio_file(&f.name),
-            size: indexers::format_size(f.len),
-            stream_href: format!("/stream/{info_hash}/{}", f.file_id),
-            download_href: format!("/download/{info_hash}/{}", f.file_id),
-            name: f.name,
+        .map(|f| {
+            // Per-file percentage when the engine reported downloaded
+            // bytes (the detail page); `None` right after `add`, where
+            // no stats snapshot exists yet.
+            let percent = f.downloaded_bytes.map(|done| {
+                if f.len == 0 {
+                    0
+                } else {
+                    (done * 100 / f.len) as u32
+                }
+            });
+            FileEntry {
+                is_video: crate::torrent::is_video_file(&f.name),
+                is_audio: crate::torrent::is_audio_file(&f.name),
+                size: indexers::format_size(f.len),
+                percent,
+                stream_href: format!("/stream/{info_hash}/{}", f.file_id),
+                download_href: format!("/download/{info_hash}/{}", f.file_id),
+                name: f.name,
+            }
         })
         .collect()
 }
@@ -446,21 +516,70 @@ fn parse_range(header: &str, total_len: u64) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
-/// Per-indexer settings (API keys, tokens, whatever a given indexer module
-/// declares it needs -- see `src/config_store.rs`). Nothing in
-/// `src/indexers/` currently reads any of this; it's here so a future
-/// indexer that needs configuration has somewhere to keep it without
-/// wiring up a new mechanism.
+/// Per-indexer settings: labeled inputs for everything the indexer's
+/// module declares it needs (see `indexers::settings_fields`), plus any
+/// legacy raw key/value rows kept from the old editor. Values live in
+/// the per-indexer config store (`src/config_store.rs`).
 pub async fn settings(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let mut indexers = Vec::new();
     for name in indexers::names() {
-        let entries = state
-            .config
-            .get_all(name)?
+        let stored: Vec<(String, String)> = state.config.get_all(name)?;
+        let get = |key: &str| {
+            stored
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+
+        let declared = indexers::settings_fields(name);
+        let declared_keys: Vec<&str> = declared.iter().map(|f| f.key).collect();
+
+        let fields = declared
             .into_iter()
+            .map(|f| {
+                let stored_value = get(f.key);
+                let has_value = stored_value
+                    .as_deref()
+                    .is_some_and(|v| !v.trim().is_empty());
+                let (checked, value) = match f.kind {
+                    indexers::SettingFieldKind::Checkbox => {
+                        // Match `toloka::Settings::load`'s flag parsing.
+                        let checked = stored_value
+                            .as_deref()
+                            .map(|v| matches!(v.trim(), "1" | "true" | "on" | "yes"))
+                            .unwrap_or(f.default_on);
+                        (checked, String::new())
+                    }
+                    _ => (false, stored_value.unwrap_or_default()),
+                };
+                SettingFieldView {
+                    label: f.label,
+                    key: f.key,
+                    input_type: match f.kind {
+                        indexers::SettingFieldKind::Password => "password",
+                        indexers::SettingFieldKind::Checkbox => "checkbox",
+                        _ => "text",
+                    },
+                    help: f.help,
+                    value,
+                    checked,
+                    is_checkbox: f.kind == indexers::SettingFieldKind::Checkbox,
+                    has_value,
+                }
+            })
+            .collect();
+
+        let extra_entries = stored
+            .into_iter()
+            .filter(|(k, _)| !declared_keys.contains(&k.as_str()))
             .map(|(key, value)| SettingEntry { key, value })
             .collect();
-        indexers.push(IndexerSettings { name, entries });
+
+        indexers.push(IndexerSettings {
+            name,
+            fields,
+            extra_entries,
+        });
     }
     Ok(HtmlTemplate(SettingsTemplate { indexers }))
 }
@@ -469,6 +588,9 @@ pub async fn settings(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
 pub struct SaveSettingForm {
     indexer: String,
     key: String,
+    /// Missing entirely when a checkbox form is submitted unchecked
+    /// (HTML omits unchecked boxes from the POST body).
+    #[serde(default)]
     value: String,
 }
 
@@ -476,7 +598,28 @@ pub async fn save_setting(
     State(state): State<Arc<AppState>>,
     Form(form): Form<SaveSettingForm>,
 ) -> Result<impl IntoResponse, AppError> {
-    state.config.set(&form.indexer, &form.key, &form.value)?;
+    let kind = indexers::settings_fields(&form.indexer)
+        .into_iter()
+        .find(|f| f.key == form.key)
+        .map(|f| f.kind);
+
+    match kind {
+        // Password inputs never pre-fill their stored value, so a blank
+        // submission means "leave it as-is", not "clear it" -- clearing
+        // is the Remove button next to the field.
+        Some(indexers::SettingFieldKind::Password)
+            if form.value.trim().is_empty() => {}
+        // Checkboxes submit no `value` when unchecked: absent = "0".
+        Some(indexers::SettingFieldKind::Checkbox) => {
+            let value = if form.value.trim().is_empty() { "0" } else { "1" };
+            state.config.set(&form.indexer, &form.key, value)?;
+        }
+        // Text fields (and undeclared legacy keys) save verbatim.
+        _ => {
+            state.config.set(&form.indexer, &form.key, &form.value)?;
+        }
+    }
+
     Ok(Redirect::to("/settings"))
 }
 

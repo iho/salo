@@ -60,11 +60,49 @@ pub const KEY_FREELEECH: &str = "freeleech_only";
 /// letters in release titles (checkbox, default on).
 pub const KEY_STRIP_CYRILLIC: &str = "strip_cyrillic";
 
-/// How long a login-derived cookie stays trusted before we re-login on
-/// the next search. Toloka's session cookies are valid for months (the
-/// autologin flag sets a year), but a short TTL keeps credentials fresh
-/// without re-authenticating on every search.
-const LOGIN_TTL: Duration = Duration::from_secs(24 * 3600);
+/// The fields the settings page renders for this indexer -- user-facing
+/// forms of the raw storage keys above (what `Settings::load` reads).
+pub fn settings_fields() -> Vec<super::SettingField> {
+    vec![
+        super::SettingField {
+            label: "Username",
+            key: KEY_USERNAME,
+            kind: super::SettingFieldKind::Text,
+            help: "Your toloka.to account login.",
+            default_on: false,
+        },
+        super::SettingField {
+            label: "Password",
+            key: KEY_PASSWORD,
+            kind: super::SettingFieldKind::Password,
+            help: "Your toloka.to account password (stored locally in SQLite).",
+            default_on: false,
+        },
+        super::SettingField {
+            label: "Session cookie",
+            key: KEY_COOKIE,
+            kind: super::SettingFieldKind::Password,
+            help: "Optional: paste a browser session's Cookie header to skip \
+                   logging in. Filled in automatically after a successful login.",
+            default_on: false,
+        },
+        super::SettingField {
+            label: "Freeleech only",
+            key: KEY_FREELEECH,
+            kind: super::SettingFieldKind::Checkbox,
+            help: "Search freeleech torrents only.",
+            default_on: false,
+        },
+        super::SettingField {
+            label: "Strip Cyrillic letters",
+            key: KEY_STRIP_CYRILLIC,
+            kind: super::SettingFieldKind::Checkbox,
+            help: "Strip Ukrainian letters from release titles, making them \
+                   scene-style English release names.",
+            default_on: true,
+        },
+    ]
+}
 
 /// Selectors for one results row, ported from `TolokaParser.ParseResponse`.
 struct RowSelectors {
@@ -107,26 +145,53 @@ pub async fn search(
     query: &str,
 ) -> Result<Vec<Release>> {
     let settings = Settings::load(config)?;
-    let cookie = authenticate(client, config, &settings).await?;
 
-    // The C# request generator builds `tracker.php?o=1&s=2&nm=<term>`
-    // (sorted by registration date, descending), replaces `-` with a
-    // space in the search term (the tracker's search treats it as a
-    // literal otherwise), and adds `sds=1` in freeleech-only mode
-    // (`TolokaSettings.FreeleechOnly`, configurable via the settings
-    // store under `KEY_FREELEECH`).
-    let term = query.replace('-', " ");
-    let mut params: Vec<(&str, &str)> = vec![("o", "1"), ("s", "2"), ("nm", &term)];
-    if settings.freeleech_only {
-        params.push(("sds", "1"));
+    // A stored session cookie (captured by a previous login, or pasted
+    // in by hand on the settings page) is tried first -- a fresh login
+    // only happens when there is none, or when the site rejects it.
+    let cookie = match &settings.cookie_header {
+        Some(cookie) => cookie.clone(),
+        None => authenticate(client, config, &settings).await?,
+    };
+
+    let mut body = fetch_search_page(client, &cookie, settings.freeleech_only, query).await?;
+
+    // `CheckIfLoginNeeded`: pages served without the logout marker mean
+    // the session is gone. If we were riding a stored cookie, log in
+    // fresh and retry the search once; a session that fails right after
+    // a fresh login is a real error.
+    if !body.contains("logout=true") {
+        if settings.cookie_header.is_none() {
+            return Err(anyhow::anyhow!(
+                "{NAME} login did not produce a working session (no logout marker)"
+            ));
+        }
+
+        tracing::debug!(indexer = NAME, "stored session rejected, re-authenticating");
+        let cookie = authenticate(client, config, &settings).await?;
+        body = fetch_search_page(client, &cookie, settings.freeleech_only, query).await?;
+        if !body.contains("logout=true") {
+            return Err(anyhow::anyhow!(
+                "{NAME} session rejected even after a fresh login"
+            ));
+        }
     }
 
-    let url = reqwest::Url::parse_with_params(
-        BASE.join(SEARCH_PATH).map(|u| u.to_string()).unwrap_or_default().as_str(),
-        &params,
-    )
-        .context("failed to build search URL")?;
+    parse_results(&body, settings.strip_cyrillic)
+}
 
+/// Fetches one page of search results with the given session cookie.
+///
+/// The C# request generator builds `tracker.php?o=1&s=2&nm=<term>`
+/// (sorted by registration date, descending), replaces `-` with a
+/// space in the search term (the tracker's search treats it as a
+/// literal otherwise), and adds `sds=1` in freeleech-only mode
+/// (`TolokaSettings.FreeleechOnly`).
+async fn fetch_page(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    cookie: &str,
+) -> Result<String> {
     let body = client
         .get(url.clone())
         .header(reqwest::header::COOKIE, cookie)
@@ -140,15 +205,107 @@ pub async fn search(
         .await
         .with_context(|| format!("failed to read {NAME} response body"))?;
 
-    // `CheckIfLoginNeeded`: the tracker reports an expired/broken session
-    // by serving pages without the logout marker instead of an HTTP error.
-    if !body.contains("logout=true") {
+    Ok(body)
+}
+
+/// Fetches a search results page (built by the caller) with the given
+/// session cookie.
+async fn fetch_search_page(
+    client: &reqwest::Client,
+    cookie: &str,
+    freeleech_only: bool,
+    query: &str,
+) -> Result<String> {
+    let term = query.replace('-', " ");
+    let mut params: Vec<(&str, &str)> = vec![("o", "1"), ("s", "2"), ("nm", &term)];
+    if freeleech_only {
+        params.push(("sds", "1"));
+    }
+
+    let url = reqwest::Url::parse_with_params(
+        BASE.join(SEARCH_PATH).map(|u| u.to_string()).unwrap_or_default().as_str(),
+        &params,
+    )
+        .context("failed to build search URL")?;
+
+    fetch_page(client, &url, cookie).await
+}
+
+/// Downloads the .torrent file bytes behind a release's download URL
+/// (`download.php?id=...`), authenticating with the stored session --
+/// toloka serves a login page for those URLs without it, which is why
+/// a plain `AddTorrent::from_url` can't fetch these itself. Returns the
+/// raw bytes for `TorrentEngine::add_bytes`.
+pub async fn download_torrent(
+    client: &reqwest::Client,
+    config: &crate::config_store::ConfigStore,
+    download_url: &str,
+) -> Result<bytes::Bytes> {
+    let url = url_of(download_url)?;
+    let settings = Settings::load(config)?;
+
+    // Try the stored session first. Unlike a search results page, a
+    // *successful* download response is the bencode file itself (no
+    // logout marker anywhere), so the session check is "did we get
+    // HTML" -- a login/error page instead of the file.
+    //
+    // Fetched as raw bytes throughout: a .torrent file embeds binary
+    // SHA1 piece hashes that are not valid UTF-8, and a lossy text
+    // conversion would corrupt them (and with them the info hash).
+    let cookie = settings.cookie_header.clone().unwrap_or_default();
+    let mut body = fetch_bytes(client, &url, &cookie).await?;
+    if is_html(&body) {
+        let fresh = authenticate(client, config, &settings).await?;
+        body = fetch_bytes(client, &url, &fresh).await?;
+    }
+
+    if is_html(&body) {
         return Err(anyhow::anyhow!(
-            "{NAME} session expired or not authenticated (no logout marker in response)"
+            "{NAME} returned a login page instead of the .torrent file -- check the account"
         ));
     }
 
-    parse_results(&body, settings.strip_cyrillic)
+    Ok(body)
+}
+
+/// Fetches `url` with the session cookie as raw bytes (see
+/// [`download_torrent`] for why not text).
+async fn fetch_bytes(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    cookie: &str,
+) -> Result<bytes::Bytes> {
+    let bytes = client
+        .get(url.clone())
+        .header(reqwest::header::COOKIE, cookie)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .with_context(|| format!("request to {NAME} failed: {url}"))?
+        .error_for_status()
+        .with_context(|| format!("{NAME} returned an error status: {url}"))?
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read {NAME} response body"))?;
+
+    Ok(bytes)
+}
+
+/// Whether a response body is an HTML page rather than the bencoded
+/// .torrent document we asked for.
+fn is_html(body: &[u8]) -> bool {
+    // phpBB pages open with `<`, `<!DOCTYPE`, or `<html` (case varies,
+    // with whitespace first); bencode starts with `d`/`i`/`l`/digits.
+    body.iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'<')
+}
+
+/// Parses a download href into an absolute URL.
+fn url_of(href: &str) -> Result<reqwest::Url> {
+    reqwest::Url::parse(href)
+        .or_else(|_| BASE.join(href))
+        .context("invalid download URL")
 }
 
 /// Everything the module reads from the settings store for one search.
@@ -188,33 +345,24 @@ impl Settings {
     }
 }
 
-/// Timestamps (unix millis) of the last successful login per module --
-/// only one Toloka module exists, so this is a single entry in practice.
-static LAST_LOGIN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// Returns the `Cookie` header value to send with search requests:
-/// the cached one if present and fresh, otherwise a fresh login.
+/// Logs in and returns a fresh `Cookie` header value.
 ///
 /// Mirrors `Toloka.DoLogin`: POST to `login.php` with the same form
 /// fields (`username`, `password`, `autologin=on`, `ssl=on`, empty
-/// `redirect`, `login=Вхід`), following redirects, then collect the
-/// session cookies from the response. A failed login is detected the way
-/// `CheckIfLoginNeeded` does -- the response lacks `logout=true` -- and
-/// the site's error text (`table.forumline table span.gen`) is surfaced.
+/// `redirect`, `login=Вхід`). A phpBB login answers with a `302` back to
+/// the index plus `Set-Cookie`s -- following it with the shared client
+/// would render the landing page *as a guest* (no cookie store), which
+/// is indistinguishable from a failed login, so the POST runs on a
+/// throwaway no-redirect client and the cookies are taken from the 302
+/// itself. The session is then verified with a real request before it's
+/// trusted; a failed login is detected the way `CheckIfLoginNeeded`
+/// does -- the response lacks `logout=true` -- and the site's error text
+/// (`table.forumline table span.gen`) is surfaced.
 async fn authenticate(
     client: &reqwest::Client,
     config: &crate::config_store::ConfigStore,
     settings: &Settings,
 ) -> Result<String> {
-    if let Some(cookie) = &settings.cookie_header
-        && LAST_LOGIN
-            .lock()
-            .expect("login mutex poisoned")
-            .is_some_and(|at| at.elapsed() < LOGIN_TTL)
-    {
-        return Ok(cookie.clone());
-    }
-
     let (Some(username), Some(password)) = (&settings.username, &settings.password) else {
         return Err(anyhow::anyhow!(
             "{NAME} requires a login: set the '{KEY_USERNAME}' and '{KEY_PASSWORD}' keys for \
@@ -237,7 +385,15 @@ async fn authenticate(
         ("login", "Вхід"),
     ]);
 
-    let response = client
+    // A one-off client that does NOT follow the 302 -- the session
+    // cookies live on the redirect response, and the shared client has
+    // no cookie store to carry them to the landing page.
+    let no_redirects = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build login client")?;
+
+    let response = no_redirects
         .post(login_url.clone())
         .header(reqwest::header::REFERER, login_url.as_str())
         .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -245,30 +401,41 @@ async fn authenticate(
         .body(encoded)
         .send()
         .await
-        .with_context(|| format!("login request to {NAME} failed"))?
-        .error_for_status()
-        .with_context(|| format!("{NAME} login returned an error status"))?;
+        .with_context(|| format!("login request to {NAME} failed"))?;
+
+    let status = response.status();
+
+    // phpBB: 200 = the form re-rendered with an error message (bad
+    // credentials), 302 = logged in, cookies on this response.
+    if !status.is_redirection() {
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("failed to read {NAME} login response body"))?;
+        let message = extract_login_error(&body).unwrap_or_else(|| {
+            format!("unexpected login response status {status} (no error message on the page)")
+        });
+        return Err(anyhow::anyhow!("{NAME} authentication failed: {message}"));
+    }
 
     // Collect Set-Cookie headers the way Prowlarr's `response.GetCookies`
     // does -- the shared client has no cookie store (no `cookies` cargo
     // feature), so the header value is rebuilt by hand.
     let cookie_header = join_set_cookies(response.headers())
-        .context("login succeeded but {NAME} sent no session cookies")?;
+        .with_context(|| format!("{NAME} login redirect had no session cookies"))?;
 
-    let body = response
-        .text()
-        .await
-        .with_context(|| format!("failed to read {NAME} login response body"))?;
-
+    // Verify the session works before trusting it: the site must serve
+    // an authenticated page (one carrying the logout marker) for these
+    // cookies. The C# counts a login as failed if this same check fails
+    // on the followed landing page.
+    let body = fetch_search_page(client, &cookie_header, false, "").await?;
     if !body.contains("logout=true") {
-        let message = extract_login_error(&body).unwrap_or_else(|| {
-            "Unknown error message, please report (login response had no logout marker)".to_string()
-        });
-        return Err(anyhow::anyhow!("{NAME} authentication failed: {message}"));
+        return Err(anyhow::anyhow!(
+            "{NAME} login accepted but the session does not work (no logout marker on landing page)"
+        ));
     }
 
     config.set(NAME, KEY_COOKIE, &cookie_header)?;
-    *LAST_LOGIN.lock().expect("login mutex poisoned") = Some(std::time::Instant::now());
 
     tracing::info!(indexer = NAME, "authentication succeeded");
     Ok(cookie_header)
@@ -293,24 +460,43 @@ fn form_urlencoded(pairs: &[(&str, &str)]) -> String {
 
 /// Rebuilds a `Cookie` header from all `Set-Cookie` response headers:
 /// just the `name=value` pairs, dropping attributes like `Path`/`HttpOnly`.
+///
+/// Duplicate names keep only the LAST value -- phpBB's login 302 sets
+/// `toloka_data`/`toloka_sid` twice (first the guest's, then the
+/// authenticated session's), and a real cookie jar would have the second
+/// overwrite the first. Sending both makes the site read the guest one.
 fn join_set_cookies(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let mut pairs = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for value in headers.get_all(reqwest::header::SET_COOKIE) {
         let Ok(raw) = value.to_str() else {
             continue;
         };
         // First `;`-separated segment is the cookie itself. Split on the
         // first `=` only -- values may contain `=` (e.g. urlencoded data).
-        let pair = raw.split(';').next()?.trim();
-        if pair.is_empty() || !pair.contains('=') {
+        let pair = raw.split(';').next().unwrap_or("").trim();
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if name.is_empty() {
             continue;
         }
-        pairs.push(pair.to_string());
+        // Later Set-Cookies win, like a real cookie jar.
+        if let Some(slot) = pairs.iter_mut().find(|(n, _)| n == name) {
+            slot.1 = value.to_string();
+        } else {
+            pairs.push((name.to_string(), value.to_string()));
+        }
     }
     if pairs.is_empty() {
         return None;
     }
-    Some(pairs.join("; "))
+    Some(
+        pairs
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 /// `DoLogin`'s error extraction: `table.forumline table span.gen`'s first
@@ -785,5 +971,32 @@ mod tests {
         assert_eq!(leading_balanced_tag("[UA] rest"), Some("[UA]"));
         assert_eq!(leading_balanced_tag("a (b) c"), None);
         assert_eq!(leading_balanced_tag("(unclosed"), None);
+    }
+
+    #[test]
+    fn set_cookies_last_duplicate_wins() {
+        // phpBB's login 302 sets the guest session first, then the
+        // authenticated one -- only the last must survive in the header.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::SET_COOKIE,
+            "toloka_data=guest; path=/; httponly".parse().unwrap(),
+        );
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "toloka_sid=first; path=/".parse().unwrap(),
+        );
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "toloka_data=authed; path=/; httponly".parse().unwrap(),
+        );
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "toloka_sid=second; path=/".parse().unwrap(),
+        );
+        assert_eq!(
+            join_set_cookies(&headers).as_deref(),
+            Some("toloka_data=authed; toloka_sid=second")
+        );
     }
 }

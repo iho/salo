@@ -13,10 +13,11 @@ librqbit = "9.0.1"
 mime_guess = "2.0.5"
 percent-encoding = "2.3.2"
 regex = "1.13.1"
-reqwest = { version = "0.13.5", features = ["stream"] }
+reqwest = { version = "0.13.5", features = ["query", "stream"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }

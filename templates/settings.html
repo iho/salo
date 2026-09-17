@@ -4,42 +4,89 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SALO &middot; Settings</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/theme.css">
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
-    section { margin-bottom: 2rem; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 0.75rem; }
-    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }
-    form.add-setting { display: flex; gap: 0.5rem; }
-    form.add-setting input { flex: 1; padding: 0.4rem; }
-    p.hint { color: #666; font-size: 0.9rem; }
+    section { margin-bottom: 2.5rem; }
+    h2 { margin-bottom: 0.25rem; }
+    p.hint { font-size: 0.9rem; margin-top: 0; }
+    form.field { display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0 0; }
+    form.field label { flex: 0 0 9rem; font-weight: 600; }
+    form.field .control { flex: 1; display: flex; align-items: center; gap: 0.5rem; }
+    form.field input[type="text"], form.field input[type="password"] { flex: 1; padding: 0.4rem; }
+    span.help { display: block; font-size: 0.85rem; margin: 0.15rem 0 0 9.75rem; }
+    span.set-hint { font-size: 0.85rem; white-space: nowrap; }
+    form.inline { display: inline; }
+    button.small { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+    h3.legacy { font-size: 0.95rem; margin-bottom: 0.4rem; }
+    table { margin-bottom: 0.75rem; }
+    @media (max-width: 600px) {
+      form.field { display: block; }
+      form.field .control { margin-top: 0.3rem; }
+      span.help { margin-left: 0; }
+    }
   </style>
 </head>
 <body>
   <p><a href="/">&laquo; back to search</a></p>
   <h1>Settings</h1>
   <p class="hint">
-    Per-indexer configuration (API keys, tokens, etc.), stored locally in
-    SQLite. Nothing built into this binary currently requires any of
-    this -- it's here for indexer definitions that declare they need it.
+    Per-indexer configuration (logins, passwords, options), stored locally
+    in SQLite. Password fields are masked and never shown back -- leave one
+    blank to keep the stored value, use Remove to clear it.
   </p>
 
   {% for idx in indexers %}
     <section>
       <h2>{{ idx.name }}</h2>
-      {% if idx.entries.is_empty() %}
-        <p class="hint">No settings stored.</p>
+      {% if idx.fields.is_empty() && idx.extra_entries.is_empty() %}
+        <p class="hint">No configuration needed for this indexer.</p>
       {% else %}
+        {% for field in idx.fields %}
+          {% if field.is_checkbox %}
+            <form class="field" method="post" action="/settings">
+              <input type="hidden" name="indexer" value="{{ idx.name }}">
+              <input type="hidden" name="key" value="{{ field.key }}">
+              <label>{{ field.label }}</label>
+              <span class="control">
+                <input type="checkbox" name="value" value="1" {% if field.checked %}checked{% endif %}>
+                <button type="submit">Save</button>
+              </span>
+            </form>
+          {% else %}
+            <form class="field" method="post" action="/settings">
+              <input type="hidden" name="indexer" value="{{ idx.name }}">
+              <input type="hidden" name="key" value="{{ field.key }}">
+              <label>{{ field.label }}</label>
+              <span class="control">
+                {% if field.input_type == "password" %}
+                  {# Never echo a stored secret back into the page. #}
+                  <input type="password" name="value" placeholder="{{ field.label }}">
+                  {% if field.has_value %}<span class="set-hint">(set)</span>{% endif %}
+                {% else %}
+                  <input type="text" name="value" placeholder="{{ field.label }}" value="{{ field.value }}">
+                {% endif %}
+                <button type="submit">Save</button>
+              </span>
+            </form>
+          {% endif %}
+          <span class="help">{{ field.help }}</span>
+        {% endfor %}
+      {% endif %}
+
+      {% if !idx.extra_entries.is_empty() %}
+        <h3 class="legacy">Other stored values</h3>
         <table>
           <tbody>
-            {% for entry in idx.entries %}
+            {% for entry in idx.extra_entries %}
               <tr>
                 <td>{{ entry.key }}</td>
                 <td>{{ entry.value }}</td>
                 <td>
-                  <form method="post" action="/settings/delete">
+                  <form class="inline" method="post" action="/settings/delete">
                     <input type="hidden" name="indexer" value="{{ idx.name }}">
                     <input type="hidden" name="key" value="{{ entry.key }}">
-                    <button type="submit">Remove</button>
+                    <button type="submit" class="small">Remove</button>
                   </form>
                 </td>
               </tr>
@@ -47,14 +94,9 @@
           </tbody>
         </table>
       {% endif %}
-
-      <form class="add-setting" method="post" action="/settings">
-        <input type="hidden" name="indexer" value="{{ idx.name }}">
-        <input type="text" name="key" placeholder="key" required>
-        <input type="text" name="value" placeholder="value" required>
-        <button type="submit">Save</button>
-      </form>
     </section>
   {% endfor %}
+
+  <button id="theme-toggle" type="button">Theme</button>
 </body>
 </html>
