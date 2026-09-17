@@ -2856,6 +2856,7 @@ dependencies = [
  "askama",
  "axum",
  "bytes",
+ "encoding_rs",
  "futures-util",
  "librqbit",
  "mime_guess",

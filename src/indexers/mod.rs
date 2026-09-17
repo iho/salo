@@ -10,11 +10,18 @@
 //! means adding a new module and a new `Registered` variant below.
 
 mod academic_torrents;
+mod annas_archive;
 mod archive_org;
 mod generic_table;
+mod knaben;
 mod linuxtracker;
+mod piratebay;
+mod pornolab;
 mod public_domain_torrents;
+mod rutracker;
+mod subsplease;
 mod toloka;
+mod torrents_csv;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -71,6 +78,13 @@ enum Registered {
     AcademicTorrents,
     PublicDomainTorrents,
     ArchiveOrg,
+    AnnaArchive,
+    Knaben,
+    PirateBay,
+    PornoLab,
+    RuTracker,
+    SubsPlease,
+    TorrentsCsv,
     Toloka,
 }
 
@@ -81,6 +95,13 @@ impl Registered {
         Registered::AcademicTorrents,
         Registered::PublicDomainTorrents,
         Registered::ArchiveOrg,
+        Registered::AnnaArchive,
+        Registered::Knaben,
+        Registered::PirateBay,
+        Registered::PornoLab,
+        Registered::RuTracker,
+        Registered::SubsPlease,
+        Registered::TorrentsCsv,
         Registered::Toloka,
     ];
 
@@ -91,6 +112,13 @@ impl Registered {
             Self::AcademicTorrents => academic_torrents::NAME,
             Self::PublicDomainTorrents => public_domain_torrents::NAME,
             Self::ArchiveOrg => archive_org::NAME,
+            Self::AnnaArchive => annas_archive::NAME,
+            Self::Knaben => knaben::NAME,
+            Self::PirateBay => piratebay::NAME,
+            Self::PornoLab => pornolab::NAME,
+            Self::RuTracker => rutracker::NAME,
+            Self::SubsPlease => subsplease::NAME,
+            Self::TorrentsCsv => torrents_csv::NAME,
             Self::Toloka => toloka::NAME,
         }
     }
@@ -101,6 +129,8 @@ impl Registered {
     /// editor inviting people to invent keys nothing reads.
     fn settings_fields(&self) -> Vec<SettingField> {
         match self {
+            Self::PornoLab => pornolab::settings_fields(),
+            Self::RuTracker => rutracker::settings_fields(),
             Self::Toloka => toloka::settings_fields(),
             _ => Vec::new(),
         }
@@ -118,6 +148,15 @@ impl Registered {
             Self::AcademicTorrents => academic_torrents::search(client, query).await,
             Self::PublicDomainTorrents => public_domain_torrents::search(client, query).await,
             Self::ArchiveOrg => archive_org::search(client, query).await,
+            Self::AnnaArchive => annas_archive::search(client, query).await,
+            Self::Knaben => knaben::search(client, query).await,
+            Self::PirateBay => piratebay::search(client, query).await,
+            Self::SubsPlease => subsplease::search(client, query).await,
+            Self::TorrentsCsv => torrents_csv::search(client, query).await,
+            // Login-walled: these read their credentials/session cookie
+            // from the per-indexer settings store.
+            Self::PornoLab => pornolab::search(client, config, query).await,
+            Self::RuTracker => rutracker::search(client, config, query).await,
             // Toloka is login-walled: it reads its credentials/session
             // cookie and its Freeleech-only / strip-Cyrillic toggles from
             // the per-indexer settings store (see `toloka::search`'s doc
@@ -159,6 +198,12 @@ pub async fn download_torrent(
 ) -> Result<Option<bytes::Bytes>> {
     match indexer {
         "toloka" => Ok(Some(toloka::download_torrent(client, config, download_url).await?)),
+        "pornolab" => Ok(Some(
+            pornolab::download_torrent(client, config, download_url).await?,
+        )),
+        "rutracker" => Ok(Some(
+            rutracker::download_torrent(client, config, download_url).await?,
+        )),
         _ => Ok(None),
     }
 }

@@ -85,6 +85,8 @@ Adding a new site means writing a new module and registering it in the
 
 ### Indexers included
 
+Public, no account needed — each verified live:
+
 - **`generic-table`** — not a real site; a placeholder showing the
   shape of a typical HTML-table tracker (selectors + regex magnet
   fallback), meant to be adapted for a specific site.
@@ -94,16 +96,41 @@ Adding a new site means writing a new module and registering it in the
   feed rather than scraping its search page, per its own request to bots.
 - **`publicdomaintorrents`** — [publicdomaintorrents.info](https://www.publicdomaintorrents.info),
   films confirmed to be in the US public domain; uses the site's RSS feed.
+- **`archive`** — [archive.org](https://archive.org), limited to the
+  `prelinger` and `etree` collections (public-domain film and
+  artist-authorized concert recordings).
+- **`knaben`** — [knaben.org](https://knaben.org), a public torrent
+  meta-search engine, via its own JSON API.
+- **`piratebay`** — [thepiratebay.xyz](https://thepiratebay.xyz), via its
+  HTML search results page.
+- **`torrentscsv`** — [torrents-csv.com](https://torrents-csv.com), a
+  self-hostable open torrent search engine, via its JSON endpoint.
+- **`subsplease`** — [subsplease.org](https://subsplease.org), an anime
+  release group publishing to public trackers, via its JSON API.
+- **`annasarchive`** — [annas-archive.pk](https://annas-archive.pk), the
+  project's own preservation torrents. Note: its free-text search is
+  behind a DDoS-Guard JavaScript challenge and cannot be used over plain
+  HTTP, so this browses the openly-served `/torrents` collection listings
+  and matches titles locally — it is a browse-and-filter, not a
+  full-text index search.
 
-These four were each verified against the real site before being wired
-up, and were chosen specifically because they only ever surface content
-that's legally distributable.
+Login-walled (need an account; configure them on `/settings`):
 
-The repository also contains a `toloka` indexer module (a
-login-authenticated scraper for a general-purpose, login-walled private
-tracker). It isn't covered by anything above, wasn't written by this
-assistant, and isn't something I can offer setup help or documentation
-for.
+- **`pornolab`** — [pornolab.net](https://pornolab.net). **Not verified
+  live**: searching requires an account, and none was available to test
+  with, so the parser is an unproven port of the Prowlarr definition.
+- **`rutracker`** — [rutracker.org](https://rutracker.org). **Not usable
+  as-is**: the site serves a Cloudflare browser challenge to plain HTTP
+  requests, including its login page, so a plain HTTP client cannot log
+  in at all. Pasting a logged-in browser session cookie into the
+  `cookie_header` setting is the only path that can work.
+- **`toloka`** — a login-authenticated scraper for a login-walled private
+  tracker. Not covered by anything above, wasn't written by this
+  assistant, and isn't something I can offer setup help for.
+
+Two definitions in the local Prowlarr checkout are deliberately **not**
+ported: `BinSearch` and `NzbIndex` are usenet indexers, and this project
+is torrent-only.
 
 ## Development
 
