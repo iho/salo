@@ -112,11 +112,25 @@ async fn cached_entries(client: &reqwest::Client) -> Result<Vec<Entry>> {
         return Ok(entries.clone());
     }
 
+    // Fetch every collection concurrently. Serially this took ~23s on a
+    // cold cache (13 pages, one after another), which dominated an
+    // "all trackers" search; concurrently it's as slow as the slowest
+    // single page.
+    let fetched = futures_util::future::join_all(
+        COLLECTIONS
+            .iter()
+            .map(|collection| async move {
+                let url = format!("{BASE_URL}/torrents/{collection}");
+                (collection, fetch_collection(client, &url).await)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await;
+
     let mut entries = Vec::new();
     let mut failures = Vec::new();
-    for collection in COLLECTIONS {
-        let url = format!("{BASE_URL}/torrents/{collection}");
-        match fetch_collection(client, &url).await {
+    for (collection, result) in fetched {
+        match result {
             Ok(mut found) => entries.append(&mut found),
             // One collection being down or renamed shouldn't sink the
             // whole indexer -- keep what worked, note what didn't.

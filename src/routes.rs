@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
@@ -13,10 +13,12 @@ use tokio_util::io::ReaderStream;
 use crate::config_store::ConfigStore;
 use crate::error::AppError;
 use crate::indexers::{self, Release};
+use crate::search_progress;
 use crate::templates::{
-    ColumnSort, FileEntry, HtmlTemplate, IndexTemplate, IndexerSettings, OpenTemplate,
-    ResultsTemplate, SettingEntry, SettingFieldView, SettingsTemplate, TorrentDetailTemplate,
-    TorrentRow, TorrentsTemplate,
+    ColumnSort, DeletedRowTemplate, FileEntry, HtmlTemplate, IndexTemplate, IndexerSettings,
+    OpenTemplate, ResultsTemplate, SaveStatusTemplate, SearchProgressTemplate, SettingEntry,
+    SettingFieldView, SettingsTemplate, StoredFileView, StoredTemplate, StoredTorrentView,
+    TorrentDetailTemplate, TorrentRow, TorrentsTemplate, TrackerProgressView,
 };
 use crate::torrent::TorrentEngine;
 
@@ -39,7 +41,7 @@ pub async fn index() -> impl IntoResponse {
     HtmlTemplate(IndexTemplate {
         trackers: indexers::names(),
         query: String::new(),
-        selected_tracker: "all".to_string(),
+        selected_trackers: Vec::new(),
         results_html: String::new(),
     })
 }
@@ -64,6 +66,14 @@ const THEME_JS: &str = include_str!("../static/theme.js");
 /// Fills the `#open-dialog` modal from a result row's hidden inputs and
 /// closes it once `/open` succeeds -- see `static/open-dialog.js`.
 const OPEN_DIALOG_JS: &str = include_str!("../static/open-dialog.js");
+
+/// Starts and polls a search job for the per-tracker progress panel --
+/// see `static/search-progress.js`.
+const SEARCH_PROGRESS_JS: &str = include_str!("../static/search-progress.js");
+
+/// Project logo/favicon, original artwork -- vendored the same way as
+/// the JS/CSS above, no external image host.
+const LOGO_SVG: &str = include_str!("../static/logo.svg");
 
 pub async fn htmx_js() -> impl IntoResponse {
     (
@@ -93,18 +103,99 @@ pub async fn open_dialog_js() -> impl IntoResponse {
     )
 }
 
-#[derive(Deserialize)]
+pub async fn search_progress_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        SEARCH_PROGRESS_JS,
+    )
+}
+
+pub async fn logo_svg() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        LOGO_SVG,
+    )
+}
+
+/// A search request's parameters.
+///
+/// Parsed by hand rather than through `axum::extract::Query`: that uses
+/// `serde_urlencoded`, which cannot collect a repeated key into a `Vec`
+/// (it fails with "invalid type: string \"knaben\", expected a sequence"),
+/// and the tracker multiselect depends on repeated `trackers=` params.
+#[derive(Default)]
 pub struct SearchQuery {
-    q: String,
-    /// A specific indexer name, or absent/"all" to search everything.
-    #[serde(default)]
-    tracker: Option<String>,
-    #[serde(default)]
-    sort: Option<String>,
-    #[serde(default)]
-    dir: Option<String>,
-    #[serde(default)]
-    page: Option<usize>,
+    pub q: String,
+    /// The trackers to search. Repeated (`?trackers=a&trackers=b`), so the
+    /// form's checkbox list can select any subset. Empty means every
+    /// tracker.
+    pub trackers: Vec<String>,
+    /// The old single-tracker parameter, still accepted so existing
+    /// bookmarks, links, and the `?tracker=` URLs this app used to emit
+    /// keep working.
+    pub tracker: Option<String>,
+    pub sort: Option<String>,
+    pub dir: Option<String>,
+    pub page: Option<usize>,
+    /// When the results came from a finished progress job, this is that
+    /// job's id: its collected releases are reused instead of searching
+    /// every tracker again for a mere sort or page change.
+    pub job: Option<String>,
+}
+
+impl SearchQuery {
+    /// Parses a raw query string (`a=1&b=2&b=3`), percent-decoding both
+    /// sides. Repeated keys are collected in order.
+    pub fn parse(raw: Option<&str>) -> Self {
+        let mut query = Self::default();
+        for (key, value) in raw.map(pairs_of).unwrap_or_default() {
+            match key.as_str() {
+                "q" => query.q = value,
+                "trackers" => query.trackers.push(value),
+                "tracker" => query.tracker = Some(value),
+                "sort" => query.sort = Some(value),
+                "dir" => query.dir = Some(value),
+                "page" => query.page = value.parse().ok(),
+                "job" => query.job = Some(value),
+                _ => {}
+            }
+        }
+        query
+    }
+
+    /// The effective selection: `trackers` if present, else the legacy
+    /// single `tracker`, else nothing (meaning "all"). `all` and blanks
+    /// are dropped, so `?tracker=all` and `?trackers=` both mean "all".
+    pub fn selected_trackers(&self) -> Vec<String> {
+        let mut chosen: Vec<String> = if self.trackers.is_empty() {
+            self.tracker.iter().cloned().collect()
+        } else {
+            self.trackers.clone()
+        };
+        chosen.retain(|t| !t.trim().is_empty() && t != "all");
+        chosen.sort();
+        chosen.dedup();
+        chosen
+    }
+}
+
+/// Percent-decoded `key=value` pairs from a query string. A key with no
+/// `=` is treated as empty-valued rather than dropped, matching how
+/// browsers submit a checked-but-blank field.
+fn pairs_of(raw: &str) -> Vec<(String, String)> {
+    raw.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(key), decode(value))
+        })
+        .collect()
+}
+
+fn decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(&s.replace('+', " "))
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 /// Runs the embedded indexer(s) (see `src/indexers/`) and returns just the
@@ -123,11 +214,12 @@ pub struct SearchQuery {
 /// would normally swap in.
 pub async fn search(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<SearchQuery>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    let q = SearchQuery::parse(raw.as_deref());
     let is_htmx = headers.contains_key("hx-request");
-    let tracker = q.tracker.filter(|t| !t.is_empty() && t != "all");
+    let trackers = q.selected_trackers();
     let sort = q.sort.as_deref().unwrap_or("seeders");
     let dir = q
         .dir
@@ -138,7 +230,13 @@ pub async fn search(
             "desc"
         });
 
-    let mut releases = indexers::search_all(&state.http, &state.config, &q.q, tracker.as_deref()).await;
+    // Reuse a finished progress job's releases when the browser hands us
+    // its id: re-running every tracker just to re-sort or page through
+    // results already in memory would be wasteful and slow.
+    let mut releases = match q.job.as_deref().and_then(search_progress::get) {
+        Some(progress) if progress.finished => progress.releases,
+        _ => indexers::search_all(&state.http, &state.config, &q.q, &trackers).await,
+    };
     sort_releases(&mut releases, sort, dir);
 
     let total_results = releases.len();
@@ -150,12 +248,22 @@ pub async fn search(
         .take(PAGE_SIZE)
         .collect();
 
-    let tracker_value = tracker.as_deref().unwrap_or("all");
+    // Every selection is carried as repeated `trackers=` params, so a
+    // sort/paging link preserves exactly what was chosen. The job id rides
+    // along too, so paging doesn't re-search every tracker.
+    let trackers_query = trackers
+        .iter()
+        .map(|t| format!("&trackers={}", encode(t)))
+        .collect::<String>();
+    let job_query = q
+        .job
+        .as_deref()
+        .map(|job| format!("&job={}", encode(job)))
+        .unwrap_or_default();
     let href = |sort: &str, dir: &str, page: usize| {
         format!(
-            "/search?q={}&tracker={}&sort={}&dir={}&page={page}",
+            "/search?q={}&sort={}&dir={}&page={page}{trackers_query}{job_query}",
             encode(&q.q),
-            encode(tracker_value),
             encode(sort),
             encode(dir),
         )
@@ -212,11 +320,201 @@ pub async fn search(
         .map_err(|e| anyhow::anyhow!("template render error: {e}"))?;
     Ok(HtmlTemplate(IndexTemplate {
         trackers: indexers::names(),
-        selected_tracker: tracker_value.to_string(),
+        selected_trackers: trackers,
         query,
         results_html,
     })
     .into_response())
+}
+
+/// Starts a background search job for the browser's progress panel and
+/// returns the little script that kicks off polling -- see
+/// `static/search-progress.js`. The job runs the same per-tracker search
+/// `search_all` does, but records each tracker's state and timing as it
+/// goes, so the page can show a bar and response times instead of sitting
+/// blank until the slowest tracker answers.
+pub async fn search_start(
+    State(state): State<Arc<AppState>>,
+    RawQuery(raw): RawQuery,
+) -> impl IntoResponse {
+    let q = SearchQuery::parse(raw.as_deref());
+    let query = q.q.trim().to_string();
+    let selected = q.selected_trackers();
+
+    let names: Vec<&'static str> = indexers::all_names()
+        .into_iter()
+        .filter(|name| selected.is_empty() || selected.iter().any(|s| s == name))
+        .collect();
+
+    let (id, progress) = search_progress::create(query.clone(), names.clone());
+    let targets = names;
+    let client = state.http.clone();
+    let config = Arc::clone(&state.config);
+    tokio::spawn(async move {
+        search_progress::run(progress, client, config, query, targets).await;
+    });
+
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        format!("window.__saloStartSearch({id:?});"),
+    )
+}
+
+/// Polls one search job: the progress panel while it runs, and a redirect
+/// to the real results (from the job's own collected releases, so nothing
+/// is searched twice) once it finishes.
+pub async fn search_progress(Path(id): Path<String>) -> Result<Response, AppError> {
+    let Some(progress) = search_progress::get(&id) else {
+        // The job aged out; stop polling rather than spinning forever.
+        return Ok((
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "",
+        )
+            .into_response());
+    };
+
+    if progress.finished {
+        // Results are already collected -- hand the browser the URL for
+        // them and let it navigate (hx-push-url keeps the address bar in
+        // sync). `id` lets /search reuse this job's releases.
+        return Ok((
+            [(
+                header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            )],
+            format!("window.__saloFinishSearch({id:?});"),
+        )
+            .into_response());
+    }
+
+    let view = SearchProgressTemplate {
+        query: progress.query.clone(),
+        trackers: progress
+            .trackers
+            .iter()
+            .map(|t| TrackerProgressView {
+                name: t.name,
+                state: t.state.as_str(),
+                elapsed_ms: t.elapsed_ms,
+                results: t.results,
+                error: t.error.clone(),
+            })
+            .collect(),
+        done_count: progress.done_count(),
+        total: progress.total(),
+        percent: progress.percent(),
+        elapsed_ms: progress.elapsed_ms(),
+        slowest_ms: progress.slowest_ms(),
+        finished: false,
+    };
+    Ok(HtmlTemplate(view).into_response())
+}
+
+/// Everything recorded in SQLite about torrents added here -- including
+/// ones no longer active in the client, which is what makes the database
+/// useful for finding downloaded files again (or re-adding a torrent).
+pub async fn stored(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let stored = state.torrents.store().all()?;
+    let now = crate::torrent_store::unix_now();
+
+    // The stored `active` flag says a torrent was in the client when it was
+    // written, but the client's own state doesn't survive a restart -- so
+    // trust what's actually running right now instead. Otherwise a
+    // restarted instance would claim torrents are active when nothing is
+    // attached, and hide the Re-add button that fixes it.
+    let live: std::collections::HashSet<String> = state
+        .torrents
+        .list()
+        .into_iter()
+        .map(|t| t.info_hash)
+        .collect();
+
+    Ok(HtmlTemplate(StoredTemplate {
+        torrents: stored
+            .into_iter()
+            .map(|t| StoredTorrentView {
+                active: live.contains(&t.info_hash),
+                total_size: indexers::format_size(t.total_bytes),
+                added_ago: humanize_ago(now.saturating_sub(t.added_at).max(0) as u64),
+                finished_ago: t
+                    .finished_at
+                    .map(|at| humanize_ago(now.saturating_sub(at).max(0) as u64)),
+                files: t
+                    .files
+                    .into_iter()
+                    .map(|f| {
+                        // Check the real path: the point of this page is
+                        // telling you what you can still get back.
+                        let on_disk = state.torrents.store().saved_path(&t.output_folder, &f.name);
+                        StoredFileView {
+                            present: on_disk.is_file(),
+                            size: indexers::format_size(f.len),
+                            name: f.name,
+                        }
+                    })
+                    .collect(),
+                seed_minutes: t.seed_minutes,
+                info_hash: t.info_hash,
+                name: t.name,
+                source_url: t.source_url,
+                output_folder: t.output_folder,
+            })
+            .collect(),
+    }))
+}
+
+/// Re-adds a stored torrent from the magnet/URL recorded with it -- the
+/// restore path when a torrent was removed (or the client restarted) but
+/// its files are still on disk.
+pub async fn stored_readd(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<StoredForm>,
+) -> Result<impl IntoResponse, AppError> {
+    let Some(stored) = state.torrents.store().get(&form.info_hash)? else {
+        return Err(anyhow::anyhow!("no stored record for {}", form.info_hash).into());
+    };
+    let Some(source) = stored.source.clone() else {
+        return Err(anyhow::anyhow!(
+            "the stored record for this torrent has no magnet/URL to re-add from \
+             (it was added from a site download that wasn't recorded)"
+        )
+        .into());
+    };
+
+    let folder = (!stored.output_folder.is_empty()).then(|| stored.output_folder.clone());
+    // `reattach` rather than `add`: the files are expected to still be on
+    // disk, and librqbit refuses to add a torrent over existing files.
+    state.torrents.reattach(&source, folder).await?;
+    if let Err(err) = state.torrents.store().mark_active(&form.info_hash) {
+        tracing::warn!(error = ?err, "could not mark stored torrent active");
+    }
+    Ok(Redirect::to("/stored"))
+}
+
+/// Drops a stored record and its file list. Files on disk are untouched --
+/// this only forgets what the database knew.
+pub async fn stored_forget(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<StoredForm>,
+) -> Result<impl IntoResponse, AppError> {
+    state.torrents.store().delete(&form.info_hash)?;
+    Ok(Redirect::to("/stored"))
+}
+
+#[derive(Deserialize)]
+pub struct StoredForm {
+    info_hash: String,
+}
+
+/// Coarse "3d", "5h", "12m" rendering of an age in seconds, for the stored
+/// list -- exact timestamps aren't useful there.
+fn humanize_ago(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
 }
 
 fn encode(s: &str) -> impl std::fmt::Display + '_ {
@@ -312,20 +610,37 @@ pub async fn open(
     // through librqbit's own URL fetch as before.
     let added = if let Some(indexer) = form.indexer.as_deref() {
         match indexers::download_torrent(&state.http, &state.config, indexer, &form.magnet).await? {
-            Some(bytes) => state.torrents.add_bytes(bytes, directory).await?,
-            None => state.torrents.add(&form.magnet, directory).await?,
+            Some(bytes) => state.torrents.add_bytes(bytes, directory.clone()).await?,
+            None => state.torrents.add(&form.magnet, directory.clone()).await?,
         }
     } else {
-        state.torrents.add(&form.magnet, directory).await?
+        state.torrents.add(&form.magnet, directory.clone()).await?
     };
 
-    if form.source_url.is_some() {
-        state.torrents.set_source_url(&added.info_hash, form.source_url);
-    }
+    // Record it durably FIRST, with the magnet/URL it came from. Order
+    // matters: `set_seed_limit` and `set_source_url` are UPDATEs, so they
+    // would affect no rows (and be silently lost) if the record didn't
+    // exist yet -- `persist_added` carries the source URL itself, and the
+    // seed limit is applied right after.
+    state.torrents.persist_added(
+        &added,
+        Some(form.magnet.clone()),
+        form.source_url.clone(),
+        directory,
+    );
+
     if form.seed_minutes.is_some() || form.seed_ratio.is_some() {
         state
             .torrents
             .set_seed_limit(&added.info_hash, form.seed_minutes, form.seed_ratio);
+    }
+
+    // The in-memory source URL is what the detail page reads; keep it in
+    // step with the row just written.
+    if form.source_url.is_some() {
+        state
+            .torrents
+            .set_source_url(&added.info_hash, form.source_url.clone());
     }
 
     // Freshly added: librqbit has no stats snapshot yet, so there's no
@@ -596,8 +911,9 @@ pub struct SaveSettingForm {
 
 pub async fn save_setting(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<SaveSettingForm>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     let kind = indexers::settings_fields(&form.indexer)
         .into_iter()
         .find(|f| f.key == form.key)
@@ -607,8 +923,7 @@ pub async fn save_setting(
         // Password inputs never pre-fill their stored value, so a blank
         // submission means "leave it as-is", not "clear it" -- clearing
         // is the Remove button next to the field.
-        Some(indexers::SettingFieldKind::Password)
-            if form.value.trim().is_empty() => {}
+        Some(indexers::SettingFieldKind::Password) if form.value.trim().is_empty() => {}
         // Checkboxes submit no `value` when unchecked: absent = "0".
         Some(indexers::SettingFieldKind::Checkbox) => {
             let value = if form.value.trim().is_empty() { "0" } else { "1" };
@@ -620,7 +935,21 @@ pub async fn save_setting(
         }
     }
 
-    Ok(Redirect::to("/settings"))
+    // htmx-driven saves get just this field's status back, so saving one
+    // field never re-renders the whole page (and never disturbs whatever
+    // is half-typed in another). A plain form POST (no JS) still redirects.
+    if headers.contains_key("hx-request") {
+        // Read the stored state back rather than inferring it from the
+        // submission, so a blank-password save that kept an existing value
+        // reports "(set)" correctly.
+        let set_hint = state
+            .config
+            .get_all(&form.indexer)?
+            .iter()
+            .any(|(k, v)| k == &form.key && !v.trim().is_empty());
+        return Ok(HtmlTemplate(SaveStatusTemplate { set_hint }).into_response());
+    }
+    Ok(Redirect::to("/settings").into_response())
 }
 
 #[derive(Deserialize)]
@@ -631,10 +960,17 @@ pub struct DeleteSettingForm {
 
 pub async fn delete_setting(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<DeleteSettingForm>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     state.config.delete(&form.indexer, &form.key)?;
-    Ok(Redirect::to("/settings"))
+
+    // htmx replaces the row with this (empty) response, so removing one
+    // legacy key doesn't reload the page. Plain POST redirects as before.
+    if headers.contains_key("hx-request") {
+        return Ok(HtmlTemplate(DeletedRowTemplate {}).into_response());
+    }
+    Ok(Redirect::to("/settings").into_response())
 }
 
 /// The torrent-management page: every currently added torrent, its

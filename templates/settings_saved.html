@@ -1,0 +1,5 @@
+{# The fragment htmx swaps into a field's status span after a save, so
+   saving one field never re-renders the page. `set_hint` re-shows the
+   "(set)" marker for a password that now has a stored value -- never the
+   value itself. #}
+{% if set_hint %}<span class="set-hint">(set)</span>{% endif %}<span class="saved">Saved</span>

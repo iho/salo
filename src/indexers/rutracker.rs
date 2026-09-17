@@ -1,24 +1,24 @@
 //! A real indexer for rutracker.org -- a semi-private Russian phpBB
 //! tracker, one of the largest Russian-language BitTorrent communities.
 //!
-//! NOT VERIFIED LIVE, for two independent reasons, both measured against
-//! the site rather than assumed:
+//! NOT USABLE AS-IS, verified against the live site rather than assumed:
 //!
-//! 1. Searching requires a logged-in account, and no account was
-//!    available to test with.
-//! 2. **rutracker.org sits behind a Cloudflare JavaScript challenge.**
-//!    Plain HTTP requests -- including to `forum/login.php` -- come back
-//!    as `403` with a "Just a moment..." interstitial on both
-//!    rutracker.org and rutracker.net, whatever User-Agent is sent. That
-//!    blocks logging in *at all* from a plain HTTP client, so this module
-//!    cannot work against the real site as-is; a browser-backed fetch (or
-//!    an already-solved session cookie pasted into the settings store)
-//!    would be needed. Until then treat this as a faithful port that is
-//!    not yet usable.
+//! **rutracker.org answers every plain-HTTP request with a Cloudflare
+//! "verify you are human" (Turnstile) challenge** -- including
+//! `forum/login.php`, and on rutracker.net too. A plain HTTP client has
+//! no way to pass an interactive challenge, so it cannot log in with a
+//! password at all. This was confirmed from a real browser as well: the
+//! challenge waits on a human clicking a checkbox, so even a headless
+//! browser cannot complete it unattended.
 //!
-//! Everything below mirrors the local Prowlarr definition
-//! (`RuTracker.cs`): the query parameters, the row selectors, the
-//! windows-1251 encoding, and the login form fields.
+//! The only workable path is a **session cookie pasted from a browser
+//! that already passed the challenge**: set `cookie_header` on the
+//! settings page. That session is then used directly, and this module
+//! never attempts a password login when a cookie is present.
+//!
+//! Everything else below mirrors the local Prowlarr definition
+//! (`RuTracker.cs`): query parameters, row selectors, windows-1251
+//! encoding, login form fields.
 //!
 //! The site is windows-1251, so responses are decoded explicitly rather
 //! than through reqwest's UTF-8-assuming `.text()`.
@@ -58,24 +58,27 @@ pub fn settings_fields() -> Vec<super::SettingField> {
             label: "Username",
             key: KEY_USERNAME,
             kind: super::SettingFieldKind::Text,
-            help: "Your rutracker.org account login.",
+            help: "Your rutracker.org account login. Note: as of this writing the password \
+                   below cannot be used at all -- see its help text.",
             default_on: false,
         },
         super::SettingField {
             label: "Password",
             key: KEY_PASSWORD,
             kind: super::SettingFieldKind::Password,
-            help: "Your rutracker.org account password (stored locally in SQLite). Use the \
-                   session cookie instead if the site serves a bot challenge to logins.",
+            help: "NOT USABLE: rutracker answers its login page with a Cloudflare 'verify you \
+                   are human' challenge, confirmed against the live site, so no plain HTTP \
+                   client can log in with a password at all. Set the session cookie below \
+                   instead -- this field is kept only to store the value.",
             default_on: false,
         },
         super::SettingField {
             label: "Session cookie",
             key: KEY_COOKIE,
             kind: super::SettingFieldKind::Password,
-            help: "Paste a logged-in browser session's Cookie header. This is the reliable \
-                   way in: the site serves a Cloudflare browser challenge to plain HTTP \
-                   logins, but a session cookie that already passed it works.",
+            help: "(THE WAY IN) Log in to rutracker in your browser, then copy the request's \
+                   whole 'Cookie:' header and paste it here. That session has already passed \
+                   Cloudflare's challenge, so it works where the password cannot.",
             default_on: false,
         },
         super::SettingField {
@@ -205,18 +208,39 @@ async fn session_cookie(
         .filter(|v| !v.trim().is_empty());
 
     if let Some(cookie) = stored {
-        if session_works(client, &cookie).await {
-            return Ok(cookie);
+        match session_state(client, &cookie).await {
+            Session::Ok => return Ok(cookie),
+            Session::Cloudflare => {
+                // The cookie itself is being challenged -- nothing a
+                // password login could fix, so don't even try.
+                anyhow::bail!(
+                    "{NAME} served a Cloudflare browser challenge for the stored cookie. \
+                     The session has expired or was never challenged; log in to rutracker in \
+                     your browser and paste a fresh 'Cookie:' header into '{KEY_COOKIE}'."
+                );
+            }
+            Session::Rejected => {
+                tracing::warn!(indexer = NAME, "stored session was rejected; logging in again");
+            }
         }
-        tracing::warn!(indexer = NAME, "stored session was rejected; logging in again");
     }
 
     authenticate(client, config).await
 }
 
-async fn session_works(client: &reqwest::Client, cookie: &str) -> bool {
+/// Outcome of testing a stored session against the site. A Cloudflare
+/// challenge is distinct from a merely-invalid cookie: the former cannot
+/// be fixed by logging in.
+enum Session {
+    Ok,
+    /// Cloudflare's interstitial, i.e. the challenge, not a login problem.
+    Cloudflare,
+    Rejected,
+}
+
+async fn session_state(client: &reqwest::Client, cookie: &str) -> Session {
     let Ok(url) = BASE.join(SEARCH_PATH) else {
-        return false;
+        return Session::Rejected;
     };
     let Ok(response) = client
         .get(url)
@@ -225,15 +249,23 @@ async fn session_works(client: &reqwest::Client, cookie: &str) -> bool {
         .send()
         .await
     else {
-        return false;
+        return Session::Rejected;
     };
-    if !response.status().is_success() {
-        return false;
+
+    let status = response.status();
+    let Ok(body) = decode_windows_1251(response).await else {
+        return Session::Rejected;
+    };
+
+    // Cloudflare names itself on the interstitial; that's a bot wall, not
+    // a bad session.
+    if body.contains("Just a moment") || body.contains("cf-chl") {
+        return Session::Cloudflare;
     }
-    decode_windows_1251(response)
-        .await
-        .map(|body| body.contains(LOGGED_IN_MARKER))
-        .unwrap_or(false)
+    if status.is_success() && body.contains(LOGGED_IN_MARKER) {
+        return Session::Ok;
+    }
+    Session::Rejected
 }
 
 /// `RuTracker.DoLogin`. On this site this is expected to fail with a
@@ -300,7 +332,7 @@ async fn authenticate(
     let cookie = join_set_cookies(response.headers())
         .with_context(|| format!("{NAME} login redirect had no session cookies"))?;
 
-    if !session_works(client, &cookie).await {
+    if !matches!(session_state(client, &cookie).await, Session::Ok) {
         return Err(anyhow::anyhow!(
             "{NAME} login accepted but the session does not work"
         ));

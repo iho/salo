@@ -4,8 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SALO &middot; Settings</title>
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/theme.css">
+  <script src="/htmx.min.js"></script>
   <style>
     section { margin-bottom: 2.5rem; }
     h2 { margin-bottom: 0.25rem; }
@@ -20,6 +22,12 @@
     button.small { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
     h3.legacy { font-size: 0.95rem; margin-bottom: 0.4rem; }
     table { margin-bottom: 0.75rem; }
+    /* The per-field outcome, swapped in by htmx: only this span changes on
+       save, so the page never reloads and no other field is disturbed. */
+    .status { font-size: 0.85rem; white-space: nowrap; }
+    .status .saved { color: #2f9e44; }
+    .status .failed { color: #ff453a; }
+    .htmx-request button[type="submit"] { opacity: 0.6; }
     @media (max-width: 600px) {
       form.field { display: block; }
       form.field .control { margin-top: 0.3rem; }
@@ -44,7 +52,7 @@
       {% else %}
         {% for field in idx.fields %}
           {% if field.is_checkbox %}
-            <form class="field" method="post" action="/settings">
+            <form class="field" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
               <input type="hidden" name="indexer" value="{{ idx.name }}">
               <input type="hidden" name="key" value="{{ field.key }}">
               <label>{{ field.label }}</label>
@@ -54,7 +62,7 @@
               </span>
             </form>
           {% else %}
-            <form class="field" method="post" action="/settings">
+            <form class="field" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
               <input type="hidden" name="indexer" value="{{ idx.name }}">
               <input type="hidden" name="key" value="{{ field.key }}">
               <label>{{ field.label }}</label>
@@ -62,7 +70,7 @@
                 {% if field.input_type == "password" %}
                   {# Never echo a stored secret back into the page. #}
                   <input type="password" name="value" placeholder="{{ field.label }}">
-                  {% if field.has_value %}<span class="set-hint">(set)</span>{% endif %}
+                  <span class="set-hint">{% if field.has_value %}(set){% endif %}</span>
                 {% else %}
                   <input type="text" name="value" placeholder="{{ field.label }}" value="{{ field.value }}">
                 {% endif %}
@@ -70,6 +78,8 @@
               </span>
             </form>
           {% endif %}
+          {# This field's own status; htmx replaces its contents on save. #}
+          <span class="status"></span>
           <span class="help">{{ field.help }}</span>
         {% endfor %}
       {% endif %}
@@ -83,7 +93,7 @@
                 <td>{{ entry.key }}</td>
                 <td>{{ entry.value }}</td>
                 <td>
-                  <form class="inline" method="post" action="/settings/delete">
+                  <form class="inline" hx-post="/settings/delete" hx-target="closest tr" hx-swap="outerHTML">
                     <input type="hidden" name="indexer" value="{{ idx.name }}">
                     <input type="hidden" name="key" value="{{ entry.key }}">
                     <button type="submit" class="small">Remove</button>

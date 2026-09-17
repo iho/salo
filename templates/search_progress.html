@@ -1,0 +1,22 @@
+{# The per-tracker progress panel, polled by `static/search-progress.js`
+   while a search runs. One row per tracker, with a bar and its response
+   time; the whole panel is replaced on every poll. #}
+<div class="progress-head">
+  <strong>{% if finished %}Done{% else %}Searching{% endif %}</strong>
+  <span class="query">&ldquo;{{ query }}&rdquo;</span>
+  {{ done_count }} / {{ total }} trackers
+  &middot; {{ elapsed_ms }} ms
+  {% if let Some(slowest) = slowest_ms %}&middot; slowest {{ slowest }} ms{% endif %}
+  {% if !finished %}<span class="progress-bar"><span style="width: {{ percent }}%"></span></span>{% endif %}
+</div>
+<ul class="progress-list">
+  {% for t in trackers %}
+    <li class="progress-{{ t.state }}">
+      <span class="state">{{ t.state }}</span>
+      <span class="name">{{ t.name }}</span>
+      {% if let Some(ms) = t.elapsed_ms %}<span class="ms">{{ ms }} ms</span>{% endif %}
+      {% if t.state == "done" %}<span class="count">{{ t.results }} results</span>{% endif %}
+      {% if let Some(err) = t.error %}<span class="err" title="{{ err }}">{{ err }}</span>{% endif %}
+    </li>
+  {% endfor %}
+</ul>

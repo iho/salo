@@ -24,3 +24,15 @@ tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+
+# Smaller binary and slightly fewer resident code pages (real effect on
+# RSS is modest -- this mostly trims disk/mmap size, not heap usage, but
+# it's free and matches "single small binary" over "fastest build").
+# Deliberately NOT panic = "abort": tokio isolates a panicking request
+# handler to that one task via unwinding, turning it into a 500 instead of
+# killing the whole server -- abort would remove that safety net entirely.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

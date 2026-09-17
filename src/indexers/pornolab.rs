@@ -1,13 +1,21 @@
 //! A real indexer for pornolab.net -- a semi-private Russian phpBB
 //! tracker (adult content).
 //!
-//! NOT VERIFIED LIVE. This was written from the local Prowlarr definition
-//! (`PornoLab.cs`) but could not be exercised end to end: the site only
-//! serves search results to a logged-in session, and no account was
-//! available to test with. Everything below -- selectors, query
-//! parameters, the login form fields -- mirrors the definition as
-//! written, but treat the parse as unproven until a real search with real
-//! credentials has been seen to work.
+//! VERIFIED LIVE: with a real account configured on the settings page, a
+//! search returns real rows (20 shown, titles/seeders/sizes/download
+//! links all parsed), and the open form hands `/open` the site's
+//! `dl.php?t=<topic_id>` URL, which `download_torrent` fetches with the
+//! logged-in session.
+//!
+//! Two things the live markup taught, which the definition alone didn't
+//! spell out:
+//!
+//! - The size cell (`td:nth-child(6)`) contains **the raw byte count** in
+//!   its `<u>`, with the human-readable size only in the download link's
+//!   text (`<a class="tr-dl">575.9&nbsp;MB</a>`). Reading `<u>` shows
+//!   bare bytes, so the formatted size is read from the link instead.
+//! - Detail hrefs are written `./viewtopic.php?t=...`, so joining them
+//!   naively produces `forum/./viewtopic.php`. They're normalized.
 //!
 //! The site is served in **windows-1251**, not UTF-8, so responses are
 //! decoded explicitly (the shared reqwest client's `.text()` would mangle
@@ -312,14 +320,14 @@ fn parse_results(body: &str, strip_russian: bool) -> Result<Vec<Release>> {
         releases.push(Release {
             indexer: NAME,
             title,
+            // Seeders live in `td:nth-child(7) b` (the cell also carries a
+            // bare `<u>` count, so the <b> is the right one to read).
             seeders: number_of(&row, &SEEDERS_SEL),
             leechers: number_of(&row, &LEECHERS_SEL),
-            size: row
-                .select(&SIZE_SEL)
-                .next()
-                .map(|el| el.text().collect::<String>().trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".to_string()),
+            // The size cell's `<u>` holds the raw byte count; the
+            // human-readable size is the download link's text
+            // ("575.9 MB"), so read that instead of showing bare bytes.
+            size: size_of(&row),
             // `DownloadUrl`: the site's own download endpoint, keyed by
             // the topic id -- fetched with the session by
             // `download_torrent` below.
@@ -327,11 +335,41 @@ fn parse_results(body: &str, strip_russian: bool) -> Result<Vec<Release>> {
                 "{BASE_URL}forum/dl.php?t={}",
                 query_arg(href, "t").unwrap_or_default()
             ),
-            source_url: Some(format!("{BASE_URL}forum/{href}")),
+            source_url: Some(join_forum_path(href)),
         });
     }
 
     Ok(releases)
+}
+
+/// The formatted size from the download link's text
+/// (`<a class="tr-dl">575.9&nbsp;MB</a>`), falling back to the byte count
+/// in the cell's `<u>` formatted human-readably.
+fn size_of(row: &scraper::ElementRef) -> String {
+    if let Some(text) = row
+        .select(&DOWNLOAD_SEL)
+        .next()
+        .map(|a| a.text().collect::<String>().replace('\u{a0}', " "))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("dl"))
+    {
+        return text;
+    }
+
+    row.select(&SIZE_SEL)
+        .next()
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .and_then(|t| t.replace(',', "").parse::<u64>().ok())
+        .map(super::format_size)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Hrefs on this site are written `./viewtopic.php?t=...`, so a plain
+/// `format!("{BASE}forum/{href}")` yields `forum/./viewtopic.php`. This
+/// normalizes the `./` away and returns an absolute URL.
+fn join_forum_path(href: &str) -> String {
+    let path = href.strip_prefix("./").unwrap_or(href);
+    format!("{BASE_URL}forum/{path}")
 }
 
 /// Fetches a .torrent file behind the login wall, for `TorrentEngine::add_bytes`.
@@ -438,26 +476,30 @@ fn extract_login_error(body: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // Shaped after the definition's selectors: `table#tor-tbl` rows, a
-    // `a.tr-dl` download link, `a.tLink` title, size in `td:nth-child(6)
-    // u`, seeders in `td:nth-child(7) b`, leechers in `td:nth-child(8)`.
+    // Shaped after the LIVE markup (windows-1251 page): `table#tor-tbl`
+    // rows, `a.tLink` with a `./`-relative href, the size cell carrying a
+    // raw byte count in `<u>` plus the formatted size in the `a.tr-dl`
+    // link text, seeders in `td:nth-child(7) b`, leechers in
+    // `td:nth-child(8)`.
     const SAMPLE: &str = r#"<html><body>
       <table id="tor-tbl" class="forumline"><tbody>
         <tr>
-          <td class="tLeft"><a class="f" href="tracker.php?f=1670">Эротика</a></td>
-          <td><a class="tLink" href="viewtopic.php?t=1234567">Название релиза (Russian) [2026]</a></td>
-          <td>x</td><td>y</td>
-          <td>z</td>
-          <td class="tor-size"><u>2.5 GB</u> <a class="tr-dl" href="dl.php?t=1234567">DL</a></td>
-          <td><b>42</b></td>
-          <td>7</td>
-          <td>3</td>
-          <td>w</td>
-          <td><u>1700000000</u></td>
+          <td class="row1"></td>
+          <td class="row1 tCenter">√</td>
+          <td class="row1">Сайтрипы 2026 (HD Video)</td>
+          <td class="row4 med tLeft u"><a class="med tLink bold" href="./viewtopic.php?t=1234567">Название релиза (Russian) [2026]</a></td>
+          <td class="row1">mserverm</td>
+          <td class="row4 small nowrap"><u>603924816</u>
+            <a class="small tr-dl dl-stub" href="dl.php?t=1234567">575.9&nbsp;MB</a></td>
+          <td class="row4 seedmed"><u>106</u><b class="seedmed">106</b></td>
+          <td class="row4 leechmed" title="Личи"><b>3</b></td>
+          <td class="row4 small">545</td>
+          <td class="row4 small">1</td>
+          <td class="row4 small nowrap">1789532713 04:25</td>
         </tr>
         <tr>
           <!-- awaiting moderation: no download link -->
-          <td><a class="tLink" href="viewtopic.php?t=999">Pending release</a></td>
+          <td><a class="med tLink bold" href="./viewtopic.php?t=999">Pending release</a></td>
         </tr>
       </tbody></table>
     </body></html>"#;
@@ -468,15 +510,36 @@ mod tests {
         assert_eq!(releases.len(), 1, "moderation row must be skipped");
         let r = &releases[0];
         assert_eq!(r.title, "Название релиза (Russian) [2026]");
-        assert_eq!(r.seeders, 42);
-        assert_eq!(r.leechers, 7);
-        assert_eq!(r.size, "2.5 GB");
+        // The <b> in the seeders cell, not the bare <u> count.
+        assert_eq!(r.seeders, 106);
+        assert_eq!(r.leechers, 3);
+        // The formatted size from the download link, NOT the raw byte
+        // count in <u> (which is what a naive read produced).
+        assert_eq!(r.size, "575.9 MB");
         // The topic id from the details href drives dl.php.
         assert_eq!(r.magnet, "https://pornolab.net/forum/dl.php?t=1234567");
+        // `./` in the href must be normalized away.
         assert_eq!(
             r.source_url.as_deref(),
             Some("https://pornolab.net/forum/viewtopic.php?t=1234567")
         );
+        assert!(!r.source_url.as_deref().unwrap().contains("/./"));
+    }
+
+    #[test]
+    fn size_falls_back_to_formatted_bytes() {
+        // No usable link text to read -> the <u> byte count, formatted.
+        // The size cell must sit at nth-child(6) for this to be the path
+        // under test.
+        let body = r#"<table id="tor-tbl"><tbody><tr>
+            <td><a class="tLink" href="./viewtopic.php?t=1">T</a></td>
+            <td></td><td></td><td></td><td></td>
+            <td class="tor-size"><u>1048576</u><a class="tr-dl" href="dl.php?t=1">DL</a></td>
+            <td><b>5</b></td><td>0</td>
+        </tr></tbody></table>"#;
+        let releases = parse_results(body, false).expect("parses");
+        assert_eq!(releases[0].size, "1.0 MB");
+        assert_eq!(releases[0].seeders, 5);
     }
 
     #[test]
@@ -489,22 +552,6 @@ mod tests {
         );
         // The Latin part is kept.
         assert!(releases[0].title.contains("[2026]"));
-    }
-
-    #[test]
-    fn missing_leecher_cell_is_not_fatal() {
-        // A row truncated before the leechers cell (column 8) must not
-        // panic -- leechers read as zero while seeders still parse.
-        let body = r#"<table id="tor-tbl"><tbody><tr>
-            <td><a class="tLink" href="viewtopic.php?t=1">T</a></td>
-            <td>a</td><td>b</td><td>c</td><td>d</td>
-            <td class="tor-size"><u>1 GB</u><a class="tr-dl" href="dl.php?t=1">DL</a></td>
-            <td><b>5</b></td>
-        </tr></tbody></table>"#;
-        let releases = parse_results(body, false).expect("parses");
-        assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].seeders, 5);
-        assert_eq!(releases[0].leechers, 0);
     }
 
     #[test]

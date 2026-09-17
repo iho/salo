@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SALO &middot; Stored</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/theme.css">
+  <style>
+    p.hint { font-size: 0.9rem; }
+    table { margin-bottom: 0.75rem; }
+    tr.inactive td { color: var(--muted); }
+    .badge { font-size: 0.75rem; border: 1px solid var(--border); border-radius: 4px;
+             padding: 0 0.3rem; white-space: nowrap; }
+    .file-list { margin: 0; padding-left: 1.1rem; font-size: 0.85rem; color: var(--muted); }
+    details > summary { cursor: pointer; }
+    @media (max-width: 600px) { table { display: block; overflow-x: auto; } }
+  </style>
+</head>
+<body>
+  <p><a href="/">&laquo; back to search</a> &middot; <a href="/torrents">active torrents</a></p>
+  <h1>Stored torrents</h1>
+  <p class="hint">
+    Everything this instance has ever added, recorded in SQLite -- including
+    torrents no longer active in the client, so you can find (and re-add)
+    what was downloaded. The database file (<code>salo.db</code>) is the
+    whole record: copy it to keep or restore this list.
+  </p>
+
+  {% if torrents.is_empty() %}
+    <p>Nothing stored yet.</p>
+  {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Size</th><th>Files</th><th>Saved to</th>
+          <th>Added</th><th>State</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in torrents %}
+          <tr class="{% if !t.active %}inactive{% endif %}">
+            <td>
+              <details>
+                <summary>{{ t.name }}</summary>
+                {% if let Some(url) = t.source_url %}
+                  <div><a href="{{ url }}">View on original tracker &raquo;</a></div>
+                {% endif %}
+                {% if !t.active %}
+                  <div class="file-list">Torrent removed from the client; files kept.</div>
+                {% endif %}
+                {% if let Some(n) = t.finished_ago %}
+                  <div class="file-list">Finished {{ n }} ago.</div>
+                {% endif %}
+                {% if let Some(m) = t.seed_minutes %}
+                  <div class="file-list">Seed limit: {{ m }} minutes.</div>
+                {% endif %}
+                <ul class="file-list">
+                  {% for f in t.files %}
+                    <li>{% if !f.present %}&#10007; {% else %}&#10003; {% endif %}{{ f.name }} ({{ f.size }})</li>
+                  {% endfor %}
+                </ul>
+              </details>
+            </td>
+            <td>{{ t.total_size }}</td>
+            <td>{{ t.present_count() }} / {{ t.files.len() }}</td>
+            <td>{{ t.output_folder }}</td>
+            <td>{{ t.added_ago }} ago</td>
+            <td><span class="badge">{% if t.active %}active{% else %}inactive{% endif %}</span></td>
+            <td>
+              {% if !t.active %}
+                {# Re-add from the stored magnet/URL: the record is enough to
+                   get the torrent back in the client. #}
+                <form class="inline" method="post" action="/stored/readd">
+                  <input type="hidden" name="info_hash" value="{{ t.info_hash }}">
+                  <button type="submit" class="small">Re-add</button>
+                </form>
+              {% endif %}
+              <form class="inline" method="post" action="/stored/forget">
+                <input type="hidden" name="info_hash" value="{{ t.info_hash }}">
+                <button type="submit" class="small">Forget</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <button id="theme-toggle" type="button">Theme</button>
+</body>
+</html>

@@ -8,15 +8,37 @@ use crate::indexers::Release;
 #[template(path = "index.html")]
 pub struct IndexTemplate {
     pub trackers: Vec<&'static str>,
-    /// Pre-fills the search box and tracker selector, and embeds the
+    /// Pre-fills the search box and tracker checkboxes, and embeds the
     /// already-rendered results fragment -- used when `/search` is hit
     /// as a direct navigation (a reload, a bookmark, a pasted link)
     /// rather than an HTMX fragment swap, so that URL still renders a
-    /// complete, styled page instead of a bare `<table>`. Empty/"all" for
-    /// a plain `GET /`.
+    /// complete, styled page instead of a bare `<table>`. Empty for
+    /// a plain `GET /`, and empty `selected_trackers` means "all".
     pub query: String,
-    pub selected_tracker: String,
+    pub selected_trackers: Vec<String>,
     pub results_html: String,
+}
+
+impl IndexTemplate {
+    /// Each tracker paired with whether it should render checked. Done
+    /// here rather than in the template because matching a `&'static str`
+    /// against the `Vec<String>` selection needs a closure, which Askama
+    /// expressions don't take.
+    pub fn tracker_options(&self) -> Vec<TrackerOption> {
+        self.trackers
+            .iter()
+            .map(|name| TrackerOption {
+                name,
+                checked: self.selected_trackers.iter().any(|s| s == name),
+            })
+            .collect()
+    }
+}
+
+/// One tracker checkbox: its name and whether it's currently selected.
+pub struct TrackerOption {
+    pub name: &'static str,
+    pub checked: bool,
 }
 
 /// One sortable column header: `href` already has the toggled sort/dir
@@ -83,6 +105,89 @@ pub struct IndexerSettings {
 #[template(path = "settings.html")]
 pub struct SettingsTemplate {
     pub indexers: Vec<IndexerSettings>,
+}
+
+/// The tiny fragment returned to an htmx-driven field save -- just the
+/// status for that one field, so saving never re-renders the page.
+#[derive(Template)]
+#[template(path = "settings_saved.html")]
+pub struct SaveStatusTemplate {
+    /// Re-show "(set)" next to a password field that now has a stored
+    /// value. The value itself is never sent back.
+    pub set_hint: bool,
+}
+
+/// Swapped in for a removed legacy row: htmx's `outerHTML` swap deletes
+/// the row, so this is deliberately empty.
+#[derive(Template)]
+#[template(path = "settings_deleted.html")]
+pub struct DeletedRowTemplate {}
+
+/// One tracker's live state, for the polling progress panel.
+pub struct TrackerProgressView {
+    pub name: &'static str,
+    /// `pending`, `running`, `done`, `failed` -- also the CSS class.
+    pub state: &'static str,
+    pub elapsed_ms: Option<u64>,
+    pub results: usize,
+    pub error: Option<String>,
+}
+
+/// The progress panel for an in-flight (or just-finished) search: a bar
+/// plus each tracker's response time.
+#[derive(Template)]
+#[template(path = "search_progress.html")]
+pub struct SearchProgressTemplate {
+    /// The search term, echoed so the panel says what it's showing.
+    pub query: String,
+    pub trackers: Vec<TrackerProgressView>,
+    pub done_count: usize,
+    pub total: usize,
+    pub percent: u32,
+    pub elapsed_ms: u64,
+    /// Slowest tracker so far: the wall-clock cost, since they run
+    /// concurrently.
+    pub slowest_ms: Option<u64>,
+    pub finished: bool,
+}
+
+/// One stored torrent, formatted for the "stored torrents" page.
+pub struct StoredTorrentView {
+    pub info_hash: String,
+    pub name: String,
+    pub source_url: Option<String>,
+    pub output_folder: String,
+    pub total_size: String,
+    pub added_ago: String,
+    pub finished_ago: Option<String>,
+    pub seed_minutes: Option<u64>,
+    pub active: bool,
+    pub files: Vec<StoredFileView>,
+}
+
+impl StoredTorrentView {
+    /// How many of this torrent's files are still on disk -- computed here
+    /// rather than in the template for clarity.
+    pub fn present_count(&self) -> usize {
+        self.files.iter().filter(|f| f.present).count()
+    }
+}
+
+pub struct StoredFileView {
+    pub name: String,
+    pub size: String,
+    /// Whether the file is actually present on disk right now -- the thing
+    /// that makes this list useful for recovery rather than just a record
+    /// of intent.
+    pub present: bool,
+}
+
+/// Everything recorded in SQLite, including torrents no longer in the
+/// client -- the page that makes the database useful for restoring.
+#[derive(Template)]
+#[template(path = "stored.html")]
+pub struct StoredTemplate {
+    pub torrents: Vec<StoredTorrentView>,
 }
 
 pub struct FileEntry {

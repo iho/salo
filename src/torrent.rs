@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use librqbit::api::TorrentIdOrHash;
-use librqbit::{AddTorrent, AddTorrentOptions, Session};
+use librqbit::{AddTorrent, AddTorrentOptions, Session, SessionOptions};
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the background task checks finished torrents against their
@@ -53,6 +53,9 @@ pub struct TorrentEngine {
     /// has no notion of this, so it's tracked here purely for the detail
     /// page's "view on `<indexer>`" link.
     source_urls: Mutex<HashMap<String, String>>,
+    /// Durable record of every torrent and its files, so a restart -- or a
+    /// lost download directory -- doesn't lose what was added.
+    store: Arc<crate::torrent_store::TorrentStore>,
 }
 
 /// One file of an already-added torrent. `downloaded_bytes` is `None`
@@ -90,16 +93,36 @@ pub struct TorrentSummary {
 }
 
 impl TorrentEngine {
-    pub async fn new(download_dir: PathBuf) -> Result<Arc<Self>> {
+    pub async fn new(
+        download_dir: PathBuf,
+        store: Arc<crate::torrent_store::TorrentStore>,
+        worker_threads: usize,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
-        let session = Session::new(download_dir)
-            .await
-            .context("failed to start torrent session")?;
+        // Matches librqbit's own blocking-work semaphore to the tokio
+        // runtime's actual worker count (see `main.rs`'s `WORKER_THREADS`)
+        // instead of its hardcoded default of 8, so a deliberately small
+        // runtime doesn't let disk-I/O work oversubscribe it.
+        let session = Session::new_with_opts(
+            download_dir,
+            SessionOptions {
+                runtime_worker_threads: Some(worker_threads),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("failed to start torrent session")?;
         let engine = Arc::new(Self {
             session,
             seed_policies: Mutex::new(HashMap::new()),
             source_urls: Mutex::new(HashMap::new()),
+            store,
         });
+
+        // Reload what was persisted: seed limits (with the moment each
+        // torrent finished, which the reaper times from) and source URLs.
+        // Without this, a restart silently dropped every seed limit.
+        engine.restore_persisted();
 
         let reaper = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -111,6 +134,49 @@ impl TorrentEngine {
         });
 
         Ok(engine)
+    }
+
+    /// Rebuilds the in-memory seed policies and source URLs from SQLite so
+    /// they survive a restart.
+    fn restore_persisted(&self) {
+        let stored = match self.store.all() {
+            Ok(stored) => stored,
+            Err(err) => {
+                tracing::warn!(error = ?err, "could not read stored torrents");
+                return;
+            }
+        };
+
+        let mut policies = self.seed_policies.lock().unwrap();
+        let mut urls = self.source_urls.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        for torrent in stored {
+            if let Some(url) = torrent.source_url {
+                urls.insert(torrent.info_hash.clone(), url);
+            }
+            if torrent.seed_minutes.is_some() || torrent.seed_ratio.is_some() {
+                // The stored `finished_at` is wall-clock; translate it back
+                // into "how long ago" for the reaper's `Instant`-based math.
+                let finished_at = torrent.finished_at.map(|at| {
+                    let elapsed = now.saturating_sub(at).max(0) as u64;
+                    Instant::now()
+                        .checked_sub(Duration::from_secs(elapsed))
+                        .unwrap_or_else(Instant::now)
+                });
+                policies.insert(
+                    torrent.info_hash.clone(),
+                    SeedPolicy {
+                        seed_for: torrent.seed_minutes.map(|m| Duration::from_secs(m * 60)),
+                        seed_ratio: torrent.seed_ratio,
+                        finished_at,
+                    },
+                );
+            }
+        }
     }
 
     /// Add a torrent from a magnet URI and wait for its metadata to
@@ -127,7 +193,21 @@ impl TorrentEngine {
     /// file's bytes concurrently with that download, sequentially from
     /// wherever you start reading.
     pub async fn add(&self, magnet: &str, output_folder: Option<String>) -> Result<AddedTorrent> {
-        self.add_torrent(AddTorrent::from_url(magnet), output_folder)
+        self.add_torrent(AddTorrent::from_url(magnet), output_folder, false)
+            .await
+    }
+
+    /// Re-adds a torrent whose files are expected to already be on disk --
+    /// the restore path, from a record in the store.
+    ///
+    /// `librqbit` refuses to add a torrent when a target file exists
+    /// (`overwrite = false`), which is exactly the situation here: the
+    /// files didn't go anywhere, the *client* forgot the torrent. So this
+    /// allows overwrite and lets the session validate the existing data --
+    /// it re-checks the pieces already present rather than re-downloading
+    /// them.
+    pub async fn reattach(&self, magnet: &str, output_folder: Option<String>) -> Result<AddedTorrent> {
+        self.add_torrent(AddTorrent::from_url(magnet), output_folder, true)
             .await
     }
 
@@ -139,7 +219,7 @@ impl TorrentEngine {
         bytes: bytes::Bytes,
         output_folder: Option<String>,
     ) -> Result<AddedTorrent> {
-        self.add_torrent(AddTorrent::from_bytes(bytes), output_folder)
+        self.add_torrent(AddTorrent::from_bytes(bytes), output_folder, false)
             .await
     }
 
@@ -147,9 +227,11 @@ impl TorrentEngine {
         &self,
         source: AddTorrent<'_>,
         output_folder: Option<String>,
+        allow_overwrite: bool,
     ) -> Result<AddedTorrent> {
         let opts = AddTorrentOptions {
             output_folder,
+            overwrite: allow_overwrite,
             ..Default::default()
         };
 
@@ -201,6 +283,54 @@ impl TorrentEngine {
             name,
             files,
         })
+    }
+
+    /// Records a freshly added torrent (and its files) in SQLite. Called
+    /// by the `/open` handler once the caller knows the magnet/URL it came
+    /// from, which the engine itself doesn't.
+    pub fn persist_added(
+        &self,
+        added: &AddedTorrent,
+        source: Option<String>,
+        source_url: Option<String>,
+        output_folder: Option<String>,
+    ) {
+        let folder = output_folder
+            .filter(|f| !f.is_empty())
+            .or_else(|| {
+                TorrentIdOrHash::parse(&added.info_hash)
+                    .ok()
+                    .and_then(|idx| self.session.get(idx))
+                    .map(|handle| handle.output_folder().to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let stored = crate::torrent_store::StoredTorrent {
+            info_hash: added.info_hash.clone(),
+            name: added.name.clone(),
+            source,
+            source_url,
+            output_folder: folder,
+            total_bytes: added.files.iter().map(|f| f.len).sum(),
+            added_at: crate::torrent_store::unix_now(),
+            finished_at: None,
+            seed_minutes: None,
+            seed_ratio: None,
+            active: true,
+            files: added
+                .files
+                .iter()
+                .map(|f| crate::torrent_store::StoredFile {
+                    file_id: f.file_id as u64,
+                    name: f.name.clone(),
+                    len: f.len,
+                })
+                .collect(),
+        };
+        if let Err(err) = self.store.upsert(&stored) {
+            // Persistence is a convenience, not a correctness requirement
+            // for the running torrent -- log and carry on.
+            tracing::warn!(error = ?err, "could not persist torrent");
+        }
     }
 
     /// List the files of an already-added torrent, for the detail page --
@@ -282,20 +412,39 @@ impl TorrentEngine {
             .with_context(|| format!("failed to remove torrent {info_hash}"))?;
         self.seed_policies.lock().unwrap().remove(info_hash);
         self.source_urls.lock().unwrap().remove(info_hash);
+
+        // A manual delete that keeps the files keeps the record: the point
+        // of storing this is being able to find what was downloaded. Only
+        // a delete that wipes the files drops the record entirely.
+        let result = if delete_files {
+            self.store.delete(info_hash)
+        } else {
+            self.store.mark_inactive(info_hash)
+        };
+        if let Err(err) = result {
+            tracing::warn!(error = ?err, "could not update stored torrent");
+        }
         Ok(())
     }
 
     /// Record the indexer-side page this torrent came from, for the
     /// detail page's "view on `<indexer>`" link.
     pub fn set_source_url(&self, info_hash: &str, url: Option<String>) {
-        let mut urls = self.source_urls.lock().unwrap();
-        match url {
-            Some(url) => {
-                urls.insert(info_hash.to_string(), url);
+        {
+            let mut urls = self.source_urls.lock().unwrap();
+            match &url {
+                Some(url) => {
+                    urls.insert(info_hash.to_string(), url.clone());
+                }
+                None => {
+                    urls.remove(info_hash);
+                }
             }
-            None => {
-                urls.remove(info_hash);
-            }
+        }
+        // Keep the durable copy in step, so the "view on <indexer>" link
+        // survives a restart too.
+        if let Err(err) = self.store.set_source_url_stored(info_hash, url.as_deref()) {
+            tracing::warn!(error = ?err, "could not persist source url");
         }
     }
 
@@ -311,19 +460,30 @@ impl TorrentEngine {
     /// either way -- this only stops the torrent from continuing to
     /// upload forever.
     pub fn set_seed_limit(&self, info_hash: &str, minutes: Option<u64>, ratio: Option<f64>) {
-        let mut policies = self.seed_policies.lock().unwrap();
-        if minutes.is_none() && ratio.is_none() {
-            policies.remove(info_hash);
-            return;
+        {
+            let mut policies = self.seed_policies.lock().unwrap();
+            if minutes.is_none() && ratio.is_none() {
+                policies.remove(info_hash);
+            } else {
+                policies.insert(
+                    info_hash.to_string(),
+                    SeedPolicy {
+                        seed_for: minutes.map(|m| Duration::from_secs(m * 60)),
+                        seed_ratio: ratio,
+                        finished_at: None,
+                    },
+                );
+            }
         }
-        policies.insert(
-            info_hash.to_string(),
-            SeedPolicy {
-                seed_for: minutes.map(|m| Duration::from_secs(m * 60)),
-                seed_ratio: ratio,
-                finished_at: None,
-            },
-        );
+        if let Err(err) = self.store.set_seed_limit(info_hash, minutes, ratio) {
+            tracing::warn!(error = ?err, "could not persist seed limit");
+        }
+    }
+
+    /// The durable store, for pages that report or restore what was
+    /// downloaded rather than what's currently in the client.
+    pub fn store(&self) -> Arc<crate::torrent_store::TorrentStore> {
+        Arc::clone(&self.store)
     }
 
     /// A snapshot of every currently managed torrent, for the
@@ -362,6 +522,12 @@ impl TorrentEngine {
     async fn reap_once(&self) {
         let now = Instant::now();
 
+        // Torrents seen finished for the first time this pass. Held behind
+        // a mutex because `with_torrents` takes an `Fn` closure, which
+        // can't capture a local mutably; the durable writes happen below,
+        // outside the scan.
+        let newly_finished: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
         let to_remove: Vec<(usize, String)> = self.session.with_torrents(|iter| {
             let mut policies = self.seed_policies.lock().unwrap();
             let mut to_remove = Vec::new();
@@ -374,7 +540,14 @@ impl TorrentEngine {
                 if !stats.finished {
                     continue;
                 }
+                let first_observation = policy.finished_at.is_none();
                 let finished_at = *policy.finished_at.get_or_insert(now);
+                if first_observation {
+                    newly_finished
+                        .lock()
+                        .expect("reaper scratch poisoned")
+                        .push(info_hash.clone());
+                }
 
                 let time_hit = policy
                     .seed_for
@@ -391,10 +564,23 @@ impl TorrentEngine {
             to_remove
         });
 
+        let now_unix = crate::torrent_store::unix_now();
+        let newly_finished = newly_finished.into_inner().expect("reaper scratch poisoned");
+        for info_hash in newly_finished {
+            if let Err(err) = self.store.mark_finished(&info_hash, now_unix) {
+                tracing::warn!(error = ?err, "could not persist finish time");
+            }
+        }
+
         for (id, info_hash) in to_remove {
             self.seed_policies.lock().unwrap().remove(&info_hash);
             match self.session.delete(TorrentIdOrHash::from(id), false).await {
                 Ok(()) => {
+                    // The files are kept, so the record stays -- just no
+                    // longer active in the client.
+                    if let Err(err) = self.store.mark_inactive(&info_hash) {
+                        tracing::warn!(error = ?err, "could not update stored torrent");
+                    }
                     tracing::info!(%info_hash, "removed torrent after its seed-time limit elapsed")
                 }
                 Err(err) => {

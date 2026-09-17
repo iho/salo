@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="static/logo.svg" alt="salo logo" width="96" height="96">
+</p>
+
 # salo
 
 A single, self-contained Rust binary that replaces the `*arr` stack,
@@ -28,9 +32,15 @@ Then open <http://localhost:3000>.
 
 ## What it does
 
-- **Search** — queries every embedded indexer concurrently, with
+- **Search** — queries the embedded indexers concurrently, with
   sorting (title/indexer/size/seeders/leechers), pagination, and a
-  per-tracker filter.
+  **multi-select tracker picker** (any subset; none checked means all).
+- **Live search progress** — a search runs as a background job, so the
+  page shows a progress bar plus each tracker's state and **response
+  time** instead of sitting blank until the slowest site answers. A
+  stalled tracker degrades to "that one contributed nothing" rather than
+  holding up the page. Sort and paging reuse the job's results instead of
+  re-searching.
 - **Open a result** — adds the torrent via an embedded
   [`librqbit`](https://github.com/ikatson/rqbit) session, resolves its
   metadata, and lists every file in it (not just a single guessed video
@@ -48,6 +58,14 @@ Then open <http://localhost:3000>.
 - **Torrent management** (`/torrents`) — every active torrent, its
   progress, save location, and seed limit, with per-torrent detail pages
   (`/torrents/<info_hash>`) linking back to the original tracker listing.
+- **Stored torrents** (`/stored`) — everything ever added, recorded in
+  SQLite (`torrents` + `torrent_files`), including torrents no longer in
+  the client. This is the restore path: it lists each torrent's files and
+  flags which are still on disk, and **Re-add** puts a torrent back in the
+  client from its recorded magnet — adopting the files already present
+  (validated by checksum, not re-downloaded) rather than refusing because
+  they exist. Seed limits, the finish time they're measured from, and the
+  original tracker link all survive a restart.
 - **Settings** (`/settings`) — a small embedded SQLite key/value store
   for per-indexer configuration (API keys, tokens, etc.), for indexer
   definitions that need one. Nothing ships requiring it by default.
@@ -69,6 +87,8 @@ src/
   torrent.rs        TorrentEngine: wraps the librqbit session
                      (add/list/delete/seed-limits/streaming)
   config_store.rs   embedded SQLite (rusqlite, bundled) settings store
+  torrent_store.rs  embedded SQLite record of torrents + their files
+  search_progress.rs background search jobs driving the progress panel
   indexers/         one module per indexer, see below
 templates/          Askama .html templates
 static/             vendored htmx.min.js + theme.css/theme.js (compiled
@@ -116,14 +136,17 @@ Public, no account needed — each verified live:
 
 Login-walled (need an account; configure them on `/settings`):
 
-- **`pornolab`** — [pornolab.net](https://pornolab.net). **Not verified
-  live**: searching requires an account, and none was available to test
-  with, so the parser is an unproven port of the Prowlarr definition.
+- **`pornolab`** — [pornolab.net](https://pornolab.net). **Verified live**
+  with a real account: search returns real rows (titles, seeders, sizes,
+  download links), and opening a result fetches its `.torrent` through the
+  logged-in session.
 - **`rutracker`** — [rutracker.org](https://rutracker.org). **Not usable
-  as-is**: the site serves a Cloudflare browser challenge to plain HTTP
-  requests, including its login page, so a plain HTTP client cannot log
-  in at all. Pasting a logged-in browser session cookie into the
-  `cookie_header` setting is the only path that can work.
+  as-is**: the site answers every plain-HTTP request — including its login
+  page — with a Cloudflare "verify you are human" challenge, confirmed
+  both from curl and from a real browser (the challenge waits on a human
+  clicking a checkbox). No HTTP client can log in with a password, so the
+  **session cookie** setting is the only way in: log in with your browser,
+  copy the request's `Cookie:` header, paste it into `cookie_header`.
 - **`toloka`** — a login-authenticated scraper for a login-walled private
   tracker. Not covered by anything above, wasn't written by this
   assistant, and isn't something I can offer setup help for.

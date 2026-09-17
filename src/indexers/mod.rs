@@ -25,8 +25,15 @@ mod torrents_csv;
 
 use anyhow::Result;
 use serde::Serialize;
+use std::time::Duration;
 
 use crate::config_store::ConfigStore;
+
+/// Per-indexer ceiling for one search. Well above any healthy site's
+/// response time (the slowest live one measured ~1s cold) but well under
+/// a user's patience, so a stalled or challenge-walled site degrades to
+/// "that tracker contributed nothing" instead of stalling the page.
+const INDEXER_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A single declared settings field for one indexer: how the settings
 /// page renders an input for it and where its value is stored.
@@ -208,30 +215,66 @@ pub async fn download_torrent(
     }
 }
 
+/// Runs exactly one named indexer. Used by the search-progress job, which
+/// needs each tracker's own timing and outcome rather than a merged list.
+pub async fn search_one(
+    client: &reqwest::Client,
+    config: &ConfigStore,
+    name: &str,
+    query: &str,
+) -> Result<Vec<Release>> {
+    let indexer = Registered::ALL
+        .iter()
+        .find(|i| i.name() == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown indexer {name:?}"))?;
+    indexer.search(client, config, query).await
+}
+
+/// Every tracker's name, for a progress display that lists them all.
+pub fn all_names() -> Vec<&'static str> {
+    Registered::ALL.iter().map(Registered::name).collect()
+}
+
 /// Query the embedded indexers concurrently and merge the results.
-/// `only` restricts the search to a single named indexer (used when the
-/// user picks one tracker instead of "all") so we don't pay for requests
-/// to sites the result set will just filter back out.
+/// `only` restricts the search to the named indexers (used when the user
+/// picks a subset instead of "all") so we don't pay for requests to sites
+/// the result set will just filter back out. An empty `only` means every
+/// tracker.
 ///
 /// One indexer being unreachable or returning unparseable HTML (sites
 /// change their markup) doesn't fail the whole search -- it's logged and
 /// skipped, same as a multi-indexer aggregator would treat a dead site.
+///
+/// Because the results are merged with `join_all`, the whole search takes
+/// as long as its SLOWEST indexer -- a site that stalls (Cloudflare
+/// challenges, a hung connection) holds up the page even though every
+/// other tracker already answered. Each indexer is therefore capped
+/// individually; whatever hasn't answered by then is dropped with a
+/// warning, so one bad site can't stall a search for everyone.
 pub async fn search_all(
     client: &reqwest::Client,
     config: &ConfigStore,
     query: &str,
-    only: Option<&str>,
+    only: &[String],
 ) -> Vec<Release> {
     let targets: Vec<&Registered> = Registered::ALL
         .iter()
-        .filter(|i| only.is_none_or(|name| i.name() == name))
+        .filter(|i| only.is_empty() || only.iter().any(|name| name == i.name()))
         .collect();
 
-    let results = futures_util::future::join_all(
-        targets.iter().map(|indexer| async move {
-            (indexer.name(), indexer.search(client, config, query).await)
-        }),
-    )
+    let results = futures_util::future::join_all(targets.iter().map(|indexer| async move {
+        let name = indexer.name();
+        match tokio::time::timeout(INDEXER_TIMEOUT, indexer.search(client, config, query)).await {
+            Ok(result) => (name, result),
+            Err(_) => (
+                name,
+                Err(anyhow::anyhow!(
+                    "timed out after {}s",
+                    INDEXER_TIMEOUT.as_secs()
+                )),
+            ),
+        }
+    }))
     .await;
 
     let mut releases = Vec::new();

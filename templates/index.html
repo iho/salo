@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SALO</title>
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/theme.css">
   <script src="/htmx.min.js"></script>
@@ -43,23 +44,71 @@
     form.close-form { position: absolute; top: 0.75rem; right: 0.75rem; margin: 0; }
     form.close-form button { padding: 0.1rem 0.4rem; font-size: 0.85rem; }
     .htmx-request button[type="submit"] { opacity: 0.6; }
+
+    /* Multiselect tracker picker */
+    fieldset.trackers { flex-basis: 100%; border: 1px solid var(--border); border-radius: 8px;
+                        padding: 0.5rem 0.75rem; margin: 0; }
+    fieldset.trackers legend { font-size: 0.85rem; color: var(--muted); padding: 0 0.3rem; }
+    button.link { background: none; border: none; padding: 0 0.2rem; color: var(--primary);
+                  cursor: pointer; font-size: 0.85rem; text-decoration: underline; }
+    .tracker-grid { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+    label.tracker { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.9rem;
+                    cursor: pointer; }
+
+    /* Per-tracker progress + response times */
+    .progress:empty { display: none; }
+    .progress { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem;
+                margin-bottom: 1rem; font-size: 0.85rem; }
+    .progress-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .progress-bar { flex: 1; min-width: 6rem; height: 6px; border-radius: 3px;
+                    background: var(--hover-bg); overflow: hidden; }
+    .progress-bar > span { display: block; height: 100%; background: var(--primary);
+                           transition: width 0.2s ease; }
+    ul.progress-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+    ul.progress-list li { display: flex; gap: 0.6rem; align-items: baseline; padding: 0.1rem 0; }
+    ul.progress-list .state { flex: 0 0 4.5rem; color: var(--muted); }
+    ul.progress-list .name { flex: 0 0 8rem; font-weight: 600; }
+    ul.progress-list .ms, ul.progress-list .count { color: var(--muted); }
+    ul.progress-list .err { color: #ff453a; overflow: hidden; text-overflow: ellipsis;
+                            white-space: nowrap; max-width: 28rem; }
+    ul.progress-list li.progress-done .state { color: #2f9e44; }
+    ul.progress-list li.progress-failed .state { color: #ff453a; }
   </style>
 </head>
 <body>
   <p><a href="/torrents">Torrents</a> &middot; <a href="/settings">Settings</a></p>
-  <h1>SALO</h1>
+  <h1><img src="/logo.svg" alt="" width="36" height="36" style="vertical-align: middle; margin-right: 0.4rem;">SALO</h1>
 
-  <form class="search" hx-get="/search" hx-target="#results" hx-swap="innerHTML" hx-push-url="true">
+  <form class="search" hx-get="/search/start" hx-target="#search-progress" hx-swap="none"
+        hx-push-url="false" hx-indicator=".search-indicator" hx-on::after-request="saloAfterStart(event)">
     <input type="text" name="q" placeholder="Search for a release..." value="{{ query }}" required>
-    <select name="tracker">
-      <option value="all" {% if selected_tracker == "all" %}selected{% endif %}>All trackers</option>
-      {% for t in trackers %}
-        <option value="{{ t }}" {% if selected_tracker.as_str() == *t %}selected{% endif %}>{{ t }}</option>
-      {% endfor %}
-    </select>
     <button type="submit">Search</button>
-    <span class="htmx-indicator">searching…</span>
+    <span class="htmx-indicator search-indicator">searching&hellip;</span>
+
+    {# Any subset of trackers can be picked; each checked box posts its own
+       `trackers=` param, and none checked means "all of them". #}
+    <fieldset class="trackers">
+      <legend>
+        Trackers
+        <button type="button" class="link" hx-on:click="toggleAllTrackers(true)">all</button>
+        <button type="button" class="link" hx-on:click="toggleAllTrackers(false)">none</button>
+      </legend>
+      <div class="tracker-grid">
+        {% for t in tracker_options() %}
+          <label class="tracker">
+            <input type="checkbox" name="trackers" value="{{ t.name }}"
+                   {% if t.checked %}checked{% endif %}>
+            {{ t.name }}
+          </label>
+        {% endfor %}
+      </div>
+    </fieldset>
   </form>
+
+  {# Per-tracker progress and response times for the search in flight.
+     `static/search-progress.js` starts a search job, polls this div, and
+     keeps polling across the htmx swap of #results. #}
+  <div id="search-progress" class="progress"></div>
 
   <div id="player"></div>
   <div id="results">{{ results_html|safe }}</div>
@@ -101,6 +150,7 @@
   </template>
 
   <script src="/open-dialog.js"></script>
+  <script src="/search-progress.js"></script>
   <button id="theme-toggle" type="button">Theme</button>
 </body>
 </html>

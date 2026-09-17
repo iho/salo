@@ -2,8 +2,10 @@ mod config_store;
 mod error;
 mod indexers;
 mod routes;
+mod search_progress;
 mod templates;
 mod torrent;
+mod torrent_store;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -16,8 +18,32 @@ use config_store::ConfigStore;
 use routes::AppState;
 use torrent::TorrentEngine;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Tokio's default (`#[tokio::main]` with no args) spawns one worker
+/// thread per CPU core -- each with its own OS thread stack and part of
+/// the work-stealing scheduler. For a lightly-loaded personal server
+/// (not something serving many concurrent users), that's pure overhead on
+/// anything with more than a couple of cores. `WORKER_THREADS` lets you
+/// tune it for the actual deployment box; the default of 2 keeps
+/// `librqbit`'s `block_in_place` disk-I/O offloading working (it only
+/// takes that fast path on a genuine multi-thread runtime -- see
+/// `librqbit::spawn_utils::BlockingSpawner`) while capping thread count
+/// on many-core machines. Set to `1` for the smallest footprint if you
+/// don't mind disk I/O briefly blocking request handling.
+fn main() -> anyhow::Result<()> {
+    let worker_threads: usize = std::env::var("WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+        .max(1);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?
+        .block_on(run(worker_threads))
+}
+
+async fn run(worker_threads: usize) -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let download_dir = std::env::var("DOWNLOAD_DIR")
@@ -30,7 +56,9 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
         .parse()?;
 
-    let torrents = TorrentEngine::new(download_dir).await?;
+    let torrent_store = Arc::new(torrent_store::TorrentStore::open(&db_path)?);
+    let torrents =
+        TorrentEngine::new(download_dir, Arc::clone(&torrent_store), worker_threads).await?;
     let config = Arc::new(ConfigStore::open(&db_path)?);
     let state = Arc::new(AppState {
         http: reqwest::Client::builder()
@@ -46,11 +74,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/theme.css", get(routes::theme_css))
         .route("/theme.js", get(routes::theme_js))
         .route("/open-dialog.js", get(routes::open_dialog_js))
+        .route("/search-progress.js", get(routes::search_progress_js))
+        .route("/logo.svg", get(routes::logo_svg))
         .route("/search", get(routes::search))
+        .route("/search/start", get(routes::search_start))
+        .route("/search/progress/{id}", get(routes::search_progress))
         .route("/open", post(routes::open))
         .route("/stream/{info_hash}/{file_id}", get(routes::stream))
         .route("/download/{info_hash}/{file_id}", get(routes::download))
         .route("/torrents", get(routes::torrents))
+        .route("/stored", get(routes::stored))
+        .route("/stored/readd", post(routes::stored_readd))
+        .route("/stored/forget", post(routes::stored_forget))
         .route("/torrents/delete", post(routes::delete_torrent))
         .route("/torrents/seed-limit", post(routes::set_seed_limit))
         .route("/torrents/{info_hash}", get(routes::torrent_detail))
