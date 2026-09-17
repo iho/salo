@@ -10,7 +10,20 @@
   <script src="/htmx.min.js"></script>
   <style>
     section { margin-bottom: 2.5rem; }
+    /* Anchor targets land here from /settings#toloka (etc), so headings
+       need breathing room and the target should be obvious once it's
+       jumped to -- otherwise a deep link looks like the page just opened
+       at an arbitrary scroll position. */
+    section, form.field { scroll-margin-top: 1rem; }
+    section:target, form.field:target { border-left: 3px solid var(--primary);
+                                        padding-left: 0.75rem; margin-left: -0.75rem; }
     h2 { margin-bottom: 0.25rem; }
+    /* The permalink next to a heading: invisible until the heading is
+       hovered, so it doesn't clutter the page, but always copyable. */
+    a.anchor { color: var(--muted); text-decoration: none; font-size: 0.9rem;
+               padding-left: 0.4rem; opacity: 0; }
+    h2:hover a.anchor, a.anchor:focus { opacity: 1; }
+    a.anchor:hover { color: var(--primary); }
     p.hint { font-size: 0.9rem; margin-top: 0; }
     form.field { display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0 0; }
     form.field label { flex: 0 0 9rem; font-weight: 600; }
@@ -44,8 +57,8 @@
     blank to keep the stored value, use Remove to clear it.
   </p>
 
-  <section>
-    <h2>Environment</h2>
+  <section id="environment">
+    <h2>Environment <a class="anchor" href="#environment" title="Link to this section">#</a></h2>
     <p class="hint">
       Read from the process environment at startup -- these are reported
       here, not edited from this page, because changing one needs a
@@ -75,11 +88,11 @@
      most indexers are public sites that need no account. #}
   {% for idx in indexers %}
     {% if !idx.fields.is_empty() || !idx.extra_entries.is_empty() %}
-    <section>
-      <h2>{{ idx.name }}</h2>
+    <section id="{{ idx.name }}">
+      <h2>{{ idx.name }} <a class="anchor" href="#{{ idx.name }}" title="Link to this section">#</a></h2>
       {% for field in idx.fields %}
           {% if field.is_checkbox %}
-            <form class="field" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
+            <form class="field" id="{{ idx.name }}-{{ field.key }}" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
               <input type="hidden" name="indexer" value="{{ idx.name }}">
               <input type="hidden" name="key" value="{{ field.key }}">
               <label>{{ field.label }}</label>
@@ -89,7 +102,7 @@
               </span>
             </form>
           {% else %}
-            <form class="field" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
+            <form class="field" id="{{ idx.name }}-{{ field.key }}" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
               <input type="hidden" name="indexer" value="{{ idx.name }}">
               <input type="hidden" name="key" value="{{ field.key }}">
               <label>{{ field.label }}</label>
@@ -107,7 +120,10 @@
           {% endif %}
           {# This field's own status; htmx replaces its contents on save. #}
           <span class="status"></span>
-          <span class="help">{{ field.help }}</span>
+          <span class="help">
+            {{ field.help }}
+            <a class="anchor" href="#{{ idx.name }}-{{ field.key }}" title="Link to this field">#</a>
+          </span>
         {% endfor %}
 
       {% if !idx.extra_entries.is_empty() %}

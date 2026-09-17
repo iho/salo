@@ -122,7 +122,11 @@ router with USB storage.
   nothing rather than a fabricated `0`).
 - **Settings** (`/settings`) — per-indexer configuration, the optional
   TMDB key, plus a read-only report of the environment variables in
-  effect. Indexers with nothing to configure aren't listed at all.
+  effect. Indexers with nothing to configure aren't listed at all. Every
+  section and field has an anchor, so a specific setting can be linked
+  directly: `/settings#toloka` (the tracker) or
+  `/settings#toloka-password` (one field). Each heading carries a `#`
+  permalink (visible on hover) that copies the link.
 - **Stored torrents** (`/stored`) — everything ever added, recorded in
   SQLite (`torrents` + `torrent_files`), including torrents no longer in
   the client. This is the restore path: it lists each torrent's files and
