@@ -18,8 +18,26 @@
     <tbody>
       {% for r in releases %}
         <tr>
-          <td>{{ r.title }}</td>
-          <td>{{ r.indexer }}</td>
+          <td>
+            {# The release's own page on its tracker, so a result can be
+               inspected at the source without opening the torrent. #}
+            {% if let Some(url) = r.source_url %}
+              <a href="{{ url }}" target="_blank" rel="noopener noreferrer"
+                 title="Open this release on {{ r.indexer }}">{{ r.title }} &#8599;</a>
+            {% else %}
+              {{ r.title }}
+            {% endif %}
+          </td>
+          <td>
+            {# Kept as a link too: it's the column people scan for "which
+               tracker was this from", and clicking it is the obvious move. #}
+            {% if let Some(url) = r.source_url %}
+              <a href="{{ url }}" target="_blank" rel="noopener noreferrer"
+                 title="Open this release on {{ r.indexer }}">{{ r.indexer }}</a>
+            {% else %}
+              {{ r.indexer }}
+            {% endif %}
+          </td>
           <td>{{ r.size }}</td>
           <td>{{ r.seeders }}</td>
           <td>{{ r.leechers }}</td>

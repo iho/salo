@@ -15,6 +15,7 @@ mod archive_org;
 mod generic_table;
 mod knaben;
 mod linuxtracker;
+mod nyaa;
 mod piratebay;
 mod pornolab;
 mod public_domain_torrents;
@@ -87,6 +88,7 @@ enum Registered {
     ArchiveOrg,
     AnnaArchive,
     Knaben,
+    Nyaa,
     PirateBay,
     PornoLab,
     RuTracker,
@@ -104,6 +106,7 @@ impl Registered {
         Registered::ArchiveOrg,
         Registered::AnnaArchive,
         Registered::Knaben,
+        Registered::Nyaa,
         Registered::PirateBay,
         Registered::PornoLab,
         Registered::RuTracker,
@@ -121,6 +124,7 @@ impl Registered {
             Self::ArchiveOrg => archive_org::NAME,
             Self::AnnaArchive => annas_archive::NAME,
             Self::Knaben => knaben::NAME,
+            Self::Nyaa => nyaa::NAME,
             Self::PirateBay => piratebay::NAME,
             Self::PornoLab => pornolab::NAME,
             Self::RuTracker => rutracker::NAME,
@@ -157,6 +161,7 @@ impl Registered {
             Self::ArchiveOrg => archive_org::search(client, query).await,
             Self::AnnaArchive => annas_archive::search(client, query).await,
             Self::Knaben => knaben::search(client, query).await,
+            Self::Nyaa => nyaa::search(client, query).await,
             Self::PirateBay => piratebay::search(client, query).await,
             Self::SubsPlease => subsplease::search(client, query).await,
             Self::TorrentsCsv => torrents_csv::search(client, query).await,

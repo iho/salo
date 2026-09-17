@@ -35,6 +35,9 @@ Then open <http://localhost:3000>.
 - **Search** — queries the embedded indexers concurrently, with
   sorting (title/indexer/size/seeders/leechers), pagination, and a
   **multi-select tracker picker** (any subset; none checked means all).
+  Each result's title and indexer link to that release's own page on its
+  tracker, so a result can be inspected at the source rather than only
+  opened.
 - **Live search progress** — a search runs as a background job, so the
   page shows a progress bar plus each tracker's state and **response
   time** instead of sitting blank until the slowest site answers. A
@@ -121,6 +124,8 @@ Public, no account needed — each verified live:
   artist-authorized concert recordings).
 - **`knaben`** — [knaben.org](https://knaben.org), a public torrent
   meta-search engine, via its own JSON API.
+- **`nyaa`** — [nyaa.si](https://nyaa.si), the main English-language anime
+  tracker; plain HTML search results, magnets included.
 - **`piratebay`** — [thepiratebay.xyz](https://thepiratebay.xyz), via its
   HTML search results page.
 - **`torrentscsv`** — [torrents-csv.com](https://torrents-csv.com), a
