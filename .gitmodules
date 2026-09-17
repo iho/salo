@@ -1,3 +1,6 @@
 [submodule "Prowlarr"]
 	path = Prowlarr
 	url = git@github.com:Prowlarr/Prowlarr.git
+[submodule "torrserver"]
+	path = torrserver
+	url = https://github.com/yourok/torrserver.git

@@ -12,6 +12,10 @@
     form.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
     form.inline input[type="number"] { width: 4.5rem; }
     p.hint { font-size: 0.9rem; }
+    td.speed { white-space: nowrap; }
+    /* The rates/ratio fragment refreshes itself in place, so the seed-limit
+       inputs the user is typing into are never rebuilt mid-edit. */
+    #live-stats { display: inline; }
     @media (max-width: 600px) {
       table { display: block; overflow-x: auto; }
     }
@@ -36,7 +40,10 @@
           <th>Name</th>
           <th>Progress</th>
           <th>Size</th>
+          <th>Down</th>
+          <th>Up</th>
           <th>Uploaded</th>
+          <th>Ratio</th>
           <th>Saving to</th>
           <th>Seed limit</th>
           <th></th>
@@ -44,9 +51,9 @@
       </thead>
       <tbody>
         {% for t in torrents %}
-          <tr>
+          <tr data-info-hash="{{ t.info_hash }}">
             <td><a href="/torrents/{{ t.info_hash }}">{{ t.name }}</a></td>
-            <td>
+            <td data-field="progress">
               {% if t.finished %}
                 done
                 {% if let Some(m) = t.seeded_for_minutes %}
@@ -57,7 +64,15 @@
               {% endif %}
             </td>
             <td>{{ t.total_size }}</td>
-            <td>{{ t.uploaded }}</td>
+            <td class="speed" data-field="download_speed">{{ t.download_speed }}</td>
+            <td class="speed" data-field="upload_speed">{{ t.upload_speed }}</td>
+            <td data-field="uploaded">{{ t.uploaded }}</td>
+            <td data-field="ratio">
+              {% match t.ratio %}
+                {% when Some with (r) %}<span class="{% if t.ratio_at_least_one() %}ratio-good{% endif %}">{{ r }}</span>
+                {% when None %}&mdash;
+              {% endmatch %}
+            </td>
             <td>{{ t.output_folder }}</td>
             <td>
               <form class="inline" method="post" action="/torrents/seed-limit">
@@ -81,5 +96,6 @@
   {% endif %}
 
   <button id="theme-toggle" type="button">Theme</button>
+  <script src="/torrent-stats.js"></script>
 </body>
 </html>

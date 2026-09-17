@@ -586,6 +586,7 @@ fn parse_results(body: &str, strip_cyrillic: bool) -> Result<Vec<Release>> {
             // DownloadUrl), no magnet synthesis needed.
             magnet: download_url,
             source_url,
+            comments: None,
         });
     }
 

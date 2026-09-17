@@ -14,11 +14,12 @@ use crate::config_store::ConfigStore;
 use crate::error::AppError;
 use crate::indexers::{self, Release};
 use crate::search_progress;
+use crate::tmdb;
 use crate::templates::{
-    ColumnSort, DeletedRowTemplate, FileEntry, HtmlTemplate, IndexTemplate, IndexerSettings,
-    OpenTemplate, ResultsTemplate, SaveStatusTemplate, SearchProgressTemplate, SettingEntry,
-    SettingFieldView, SettingsTemplate, StoredFileView, StoredTemplate, StoredTorrentView,
-    TorrentDetailTemplate, TorrentRow, TorrentsTemplate, TrackerProgressView,
+    ColumnSort, DeletedRowTemplate, EnvSetting, FileEntry, HtmlTemplate, IndexTemplate,
+    IndexerSettings, OpenTemplate, ResultsTemplate, SaveStatusTemplate, SearchProgressTemplate,
+    SettingEntry, SettingFieldView, SettingsTemplate, StoredFileView, StoredTemplate,
+    StoredTorrentView, TorrentDetailTemplate, TorrentRow, TorrentsTemplate, TrackerProgressView,
 };
 use crate::torrent::TorrentEngine;
 
@@ -71,6 +72,10 @@ const OPEN_DIALOG_JS: &str = include_str!("../static/open-dialog.js");
 /// see `static/search-progress.js`.
 const SEARCH_PROGRESS_JS: &str = include_str!("../static/search-progress.js");
 
+/// Polls `/torrents/stats` and updates the torrents table's live figures
+/// in place (see `static/torrent-stats.js`).
+const TORRENT_STATS_JS: &str = include_str!("../static/torrent-stats.js");
+
 /// Project logo/favicon, original artwork -- vendored the same way as
 /// the JS/CSS above, no external image host.
 const LOGO_SVG: &str = include_str!("../static/logo.svg");
@@ -114,6 +119,40 @@ pub async fn logo_svg() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/svg+xml")],
         LOGO_SVG,
+    )
+}
+
+/// Live per-torrent transfer rates and ratio, as JSON, for the torrents
+/// page's in-place refresh.
+///
+/// A single request covers every row, so the poll cost is constant
+/// regardless of how many torrents are running -- and the page never
+/// re-renders the seed-limit forms, so a field being typed into is safe.
+pub async fn torrent_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rows: Vec<serde_json::Value> = state
+        .torrents
+        .list()
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "info_hash": t.info_hash,
+                "progress_percent": t.progress_percent(),
+                "download_speed": indexers::format_speed(t.download_speed),
+                "upload_speed": indexers::format_speed(t.upload_speed),
+                "ratio": t.ratio().map(|r| format!("{r:.2}")),
+                "uploaded": indexers::format_size(t.uploaded_bytes),
+                "finished": t.finished,
+            })
+        })
+        .collect();
+    axum::Json(rows)
+}
+
+/// The small poller that keeps the torrents page's rates current.
+pub async fn torrent_stats_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        TORRENT_STATS_JS,
     )
 }
 
@@ -578,6 +617,16 @@ pub struct OpenForm {
     /// server's default download directory. Blank means use the default.
     #[serde(default)]
     directory: Option<String>,
+    /// The release's title, as shown on the results page. Only used to
+    /// name the per-torrent subfolder for a login-walled indexer's
+    /// .torrent file (whose own name isn't parsed until later).
+    #[serde(default)]
+    title: Option<String>,
+    /// Put this torrent's files in their own folder, named after the
+    /// release, rather than scattering them into the download directory.
+    /// Absent (unchecked) means flat, which is the historical behaviour.
+    #[serde(default)]
+    subfolder: Option<String>,
     /// Auto-remove this torrent (keeping the downloaded files) after it's
     /// finished and has been seeding for this many minutes. `0`/blank
     /// means seed indefinitely.
@@ -603,6 +652,7 @@ pub async fn open(
     Form(form): Form<OpenForm>,
 ) -> Result<impl IntoResponse, AppError> {
     let directory = form.directory.filter(|d| !d.is_empty());
+    let subfolder = form.subfolder.is_some();
 
     // Login-walled indexers (toloka) serve their .torrent files only to
     // an authenticated session, so fetch the bytes here and add from
@@ -610,9 +660,26 @@ pub async fn open(
     // through librqbit's own URL fetch as before.
     let added = if let Some(indexer) = form.indexer.as_deref() {
         match indexers::download_torrent(&state.http, &state.config, indexer, &form.magnet).await? {
-            Some(bytes) => state.torrents.add_bytes(bytes, directory.clone()).await?,
+            Some(bytes) => {
+                let name = form.title.clone();
+                state
+                    .torrents
+                    .add_bytes(bytes, directory.clone(), name, subfolder)
+                    .await?
+            }
+            None if subfolder => {
+                state
+                    .torrents
+                    .add_in_subfolder(&form.magnet, form.title.clone())
+                    .await?
+            }
             None => state.torrents.add(&form.magnet, directory.clone()).await?,
         }
+    } else if subfolder {
+        state
+            .torrents
+            .add_in_subfolder(&form.magnet, form.title.clone())
+            .await?
     } else {
         state.torrents.add(&form.magnet, directory.clone()).await?
     };
@@ -703,15 +770,69 @@ pub async fn torrent_detail(
         .and_then(|v| v.checked_div(summary.total_bytes))
         .unwrap_or(0) as u32;
 
+    // Computed before the fields below move out of `summary`.
+    let download_speed = indexers::format_speed(summary.download_speed);
+    let upload_speed = indexers::format_speed(summary.upload_speed);
+    let ratio = summary.ratio().map(|r| format!("{r:.2}"));
+    let total_size = indexers::format_size(summary.total_bytes);
+    let uploaded = indexers::format_size(summary.uploaded_bytes);
+    let seed_limit = seed_limit_label(summary.seed_minutes, summary.seed_ratio);
+
+    // Poster/blurb, if a TMDB key is configured and it has a match. A
+    // failure here must not break the page: the torrent's own controls
+    // are the point, the artwork is a bonus.
+    let movie = match tmdb::lookup(&state.http, &state.config, &summary.name).await {
+        Ok(found) => found,
+        Err(err) => {
+            tracing::warn!(error = ?err, "TMDB lookup failed");
+            None
+        }
+    };
+
     Ok(HtmlTemplate(TorrentDetailTemplate {
         info_hash,
         name: summary.name,
         source_url: summary.source_url,
         finished: summary.finished,
+        paused: summary.paused,
         progress_percent,
         seeded_for_minutes: summary.seeded_for_minutes,
+        download_speed,
+        upload_speed,
+        ratio,
+        total_size,
+        uploaded,
+        seed_limit,
+        seed_minutes: summary.seed_minutes.unwrap_or(0).to_string(),
+        seed_ratio: summary.seed_ratio.unwrap_or(0.0).to_string(),
+        movie,
         files,
     }))
+}
+
+/// Describes the configured seed limit in words, for the detail page.
+/// Both limits can be set at once (whichever is reached first wins), so
+/// this has to read sensibly for any combination.
+fn seed_limit_label(minutes: Option<u64>, ratio: Option<f64>) -> String {
+    match (minutes, ratio) {
+        (None, None) => "none (seeds indefinitely)".to_string(),
+        (Some(m), None) => format!("{m} minutes"),
+        (None, Some(r)) => format!("ratio {r}"),
+        (Some(m), Some(r)) => format!("{m} minutes or ratio {r}, whichever comes first"),
+    }
+}
+
+/// The read-only environment-variable section of the settings page.
+fn env_settings() -> Vec<EnvSetting> {
+    crate::env::current()
+        .into_iter()
+        .map(|(name, value, is_default, help)| EnvSetting {
+            name,
+            value,
+            is_default,
+            help,
+        })
+        .collect()
 }
 
 /// Pipes decoded torrent pieces straight into the HTTP response body as
@@ -837,7 +958,12 @@ fn parse_range(header: &str, total_len: u64) -> Option<(u64, u64)> {
 /// the per-indexer config store (`src/config_store.rs`).
 pub async fn settings(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let mut indexers = Vec::new();
-    for name in indexers::names() {
+    // The metadata section first: it is not a tracker, and rendering it
+    // through the same loop keeps its field handling (masking, the
+    // "(set)" hint) identical to every indexer's.
+    let sections = std::iter::once(crate::tmdb::SECTION).chain(indexers::names());
+
+    for name in sections {
         let stored: Vec<(String, String)> = state.config.get_all(name)?;
         let get = |key: &str| {
             stored
@@ -896,7 +1022,10 @@ pub async fn settings(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
             extra_entries,
         });
     }
-    Ok(HtmlTemplate(SettingsTemplate { indexers }))
+    Ok(HtmlTemplate(SettingsTemplate {
+        indexers,
+        env: env_settings(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -982,13 +1111,12 @@ pub async fn torrents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .list()
         .into_iter()
         .map(|t| TorrentRow {
-            progress_percent: t
-                .progress_bytes
-                .checked_mul(100)
-                .and_then(|v| v.checked_div(t.total_bytes))
-                .unwrap_or(0) as u32,
+            progress_percent: t.progress_percent(),
             total_size: indexers::format_size(t.total_bytes),
             uploaded: indexers::format_size(t.uploaded_bytes),
+            download_speed: indexers::format_speed(t.download_speed),
+            upload_speed: indexers::format_speed(t.upload_speed),
+            ratio: t.ratio().map(|r| format!("{r:.2}")),
             // `0` reads back as "indefinitely", matching the form's own
             // convention (see `zero_or_blank_as_none`) instead of a blank
             // field that looks unset by accident.
@@ -1010,6 +1138,10 @@ pub struct DeleteTorrentForm {
     info_hash: String,
     #[serde(default)]
     delete_files: Option<String>,
+    /// `"detail"` when submitted from a torrent's own page, so the
+    /// redirect returns there (see `return_to`).
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 pub async fn delete_torrent(
@@ -1020,7 +1152,23 @@ pub async fn delete_torrent(
         .torrents
         .delete(&form.info_hash, form.delete_files.is_some())
         .await?;
-    Ok(Redirect::to("/torrents"))
+    // Actions started from a torrent's own page return there, so the
+    // page reflects the result instead of bouncing to the list.
+    Ok(Redirect::to(&return_to(&form.return_to, &form.info_hash)))
+}
+
+/// Where a torrent action should send the browser afterwards: back to the
+/// torrent's detail page when the request came from there, otherwise the
+/// management list.
+///
+/// The path is built from the info hash rather than taken from the form's
+/// value, so a crafted `return_to` cannot redirect a user off-site -- the
+/// field only selects *which* of our two pages to land on.
+fn return_to(return_to: &Option<String>, info_hash: &str) -> String {
+    match return_to.as_deref() {
+        Some("detail") => format!("/torrents/{info_hash}"),
+        _ => "/torrents".to_string(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1031,6 +1179,8 @@ pub struct SeedLimitForm {
     seed_minutes: Option<u64>,
     #[serde(default, deserialize_with = "zero_or_blank_as_none")]
     seed_ratio: Option<f64>,
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 pub async fn set_seed_limit(
@@ -1040,5 +1190,73 @@ pub async fn set_seed_limit(
     state
         .torrents
         .set_seed_limit(&form.info_hash, form.seed_minutes, form.seed_ratio);
-    Redirect::to("/torrents")
+    Redirect::to(&return_to(&form.return_to, &form.info_hash))
+}
+
+#[derive(Deserialize)]
+pub struct PauseForm {
+    info_hash: String,
+    /// `"1"` pauses, anything else resumes.
+    #[serde(default)]
+    paused: Option<String>,
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
+/// Pauses a torrent (stopping it seeding or downloading) or resumes it.
+/// Keeping the torrent in the session is the point: this is the "stop
+/// seeding" action, not a removal.
+pub async fn set_paused(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<PauseForm>,
+) -> Result<impl IntoResponse, AppError> {
+    let paused = form.paused.as_deref() == Some("1");
+    state.torrents.set_paused(&form.info_hash, paused).await?;
+    Ok(Redirect::to(&return_to(&form.return_to, &form.info_hash)))
+}
+
+#[derive(Deserialize)]
+pub struct PosterForm {
+    info_hash: String,
+    /// The poster URL to use from now on. Empty clears the override and
+    /// goes back to TMDB's own first match.
+    #[serde(default)]
+    poster_url: Option<String>,
+}
+
+/// Remembers which poster the user chose for a torrent's detail page.
+///
+/// The choice is stored globally rather than per torrent: it is a
+/// preference for how this release name should be presented, and the same
+/// release re-added (or restored from `/stored`) should keep it.
+pub async fn set_poster(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<PosterForm>,
+) -> Result<impl IntoResponse, AppError> {
+    let url = form
+        .poster_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+
+    // Only a URL from TMDB's own image host is accepted. The value is
+    // rendered into an `img src`, so accepting an arbitrary URL would let
+    // a crafted link point the browser at a third party.
+    if let Some(url) = url
+        && !url.starts_with("https://image.tmdb.org/t/p/")
+    {
+        return Err(anyhow::anyhow!("poster must be a TMDB image URL").into());
+    }
+
+    match url {
+        Some(url) => state
+            .config
+            .set(tmdb::SECTION, tmdb::KEY_POSTER, url)
+            .map_err(AppError::from)?,
+        None => state
+            .config
+            .delete(tmdb::SECTION, tmdb::KEY_POSTER)
+            .map_err(AppError::from)?,
+    }
+    Ok(Redirect::to(&format!("/torrents/{}", form.info_hash)))
 }

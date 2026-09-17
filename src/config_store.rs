@@ -66,4 +66,16 @@ impl ConfigStore {
         )?;
         Ok(())
     }
+
+    /// A single stored value, or `None` when unset.
+    pub fn get(&self, indexer: &str, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("config db mutex poisoned");
+        let mut stmt =
+            conn.prepare("SELECT value FROM indexer_settings WHERE indexer = ?1 AND key = ?2")?;
+        let mut rows = stmt.query(params![indexer, key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
 }

@@ -55,6 +55,13 @@
     label.tracker { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.9rem;
                     cursor: pointer; }
 
+    /* "Own folder" choice in the open dialog: a checkbox with a long
+       label and a hint that needs to wrap under it. */
+    label.own-folder { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.5rem;
+                       align-items: start; font-size: 0.9rem; }
+    label.own-folder span.help { grid-column: 2; display: block; color: var(--muted);
+                                 font-size: 0.8rem; }
+
     /* Per-tracker progress + response times */
     .progress:empty { display: none; }
     .progress { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem;
@@ -129,7 +136,17 @@
     <form hx-post="/open" hx-target="#player" hx-swap="innerHTML" hx-indicator="#open-dialog"
           class="open-form" hx-on::after-request="openDialogAfterRequest(event)">
       <label>Save to directory
-        <input type="text" name="directory" value="downloads" placeholder="downloads">
+        <input type="text" name="directory" value="downloads" placeholder="downloads"
+               id="open-directory">
+      </label>
+      <label class="own-folder">
+        <input type="checkbox" name="subfolder" value="1" id="open-subfolder">
+        Put this torrent in its own folder, named after the release
+        <span class="help">
+          Keeps a multi-file release together instead of mixing its files
+          into the download directory. This uses the server's download
+          root, so it takes precedence over the directory above.
+        </span>
       </label>
       <label>Seed minutes <span class="help">(0 = indefinitely)</span>
         <input type="number" name="seed_minutes" min="0" value="0">

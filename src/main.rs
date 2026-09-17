@@ -1,9 +1,11 @@
 mod config_store;
+mod env;
 mod error;
 mod indexers;
 mod routes;
 mod search_progress;
 mod templates;
+mod tmdb;
 mod torrent;
 mod torrent_store;
 
@@ -32,8 +34,12 @@ use torrent::TorrentEngine;
 fn main() -> anyhow::Result<()> {
     let worker_threads: usize = std::env::var("WORKER_THREADS")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2)
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            env::DEFAULT_WORKER_THREADS
+                .parse::<usize>()
+                .expect("valid default")
+        })
         .max(1);
 
     tokio::runtime::Builder::new_multi_thread()
@@ -48,12 +54,12 @@ async fn run(worker_threads: usize) -> anyhow::Result<()> {
 
     let download_dir = std::env::var("DOWNLOAD_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./downloads"));
+        .unwrap_or_else(|_| PathBuf::from(env::DEFAULT_DOWNLOAD_DIR));
     let db_path = std::env::var("DB_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./salo.db"));
+        .unwrap_or_else(|_| PathBuf::from(env::DEFAULT_DB_PATH));
     let bind_addr: SocketAddr = std::env::var("BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+        .unwrap_or_else(|_| env::DEFAULT_BIND_ADDR.to_string())
         .parse()?;
 
     let torrent_store = Arc::new(torrent_store::TorrentStore::open(&db_path)?);
@@ -75,6 +81,7 @@ async fn run(worker_threads: usize) -> anyhow::Result<()> {
         .route("/theme.js", get(routes::theme_js))
         .route("/open-dialog.js", get(routes::open_dialog_js))
         .route("/search-progress.js", get(routes::search_progress_js))
+        .route("/torrent-stats.js", get(routes::torrent_stats_js))
         .route("/logo.svg", get(routes::logo_svg))
         .route("/search", get(routes::search))
         .route("/search/start", get(routes::search_start))
@@ -83,11 +90,14 @@ async fn run(worker_threads: usize) -> anyhow::Result<()> {
         .route("/stream/{info_hash}/{file_id}", get(routes::stream))
         .route("/download/{info_hash}/{file_id}", get(routes::download))
         .route("/torrents", get(routes::torrents))
+        .route("/torrents/stats", get(routes::torrent_stats))
         .route("/stored", get(routes::stored))
         .route("/stored/readd", post(routes::stored_readd))
         .route("/stored/forget", post(routes::stored_forget))
         .route("/torrents/delete", post(routes::delete_torrent))
         .route("/torrents/seed-limit", post(routes::set_seed_limit))
+        .route("/torrents/pause", post(routes::set_paused))
+        .route("/torrents/poster", post(routes::set_poster))
         .route("/torrents/{info_hash}", get(routes::torrent_detail))
         .route("/settings", get(routes::settings).post(routes::save_setting))
         .route("/settings/delete", post(routes::delete_setting))

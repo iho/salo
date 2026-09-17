@@ -13,6 +13,8 @@
   --input-bg: #ffffff;
   --hover-bg: #f2f2f7;
   --shadow: rgba(0, 0, 0, 0.18);
+  /* "healthy" accent, e.g. a seed ratio that has reached 1.0 */
+  --good: #1a7f37;
 }
 
 html[data-theme="dark"] {
@@ -25,6 +27,7 @@ html[data-theme="dark"] {
   --input-bg: #1c1c1e;
   --hover-bg: #242426;
   --shadow: rgba(0, 0, 0, 0.55);
+  --good: #3fb950;
 }
 
 /* One page shell for every template: same width, margins, and font, so
@@ -141,4 +144,10 @@ button:hover {
 
 #theme-toggle:active {
   transform: scale(0.92);
+}
+
+/* A seed ratio at or above 1.0 -- as much uploaded as downloaded. */
+.ratio-good {
+  color: var(--good);
+  font-weight: 600;
 }

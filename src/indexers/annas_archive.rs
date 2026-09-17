@@ -100,6 +100,7 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Release
             size: e.size.clone(),
             magnet: e.magnet.clone(),
             source_url: Some(e.source_url.clone()),
+            comments: None,
         })
         .collect())
 }
@@ -192,7 +193,7 @@ fn parse_collection(body: &str, page_url: &str) -> Vec<Entry> {
                     return None;
                 }
                 let text = a.text().collect::<String>().trim().to_string();
-                (!text.is_empty()).then_some((text, format!("{BASE_URL}{href}")))
+                (!text.is_empty()).then_some((text, super::absolute_url(BASE_URL, href)))
             })
             .next()
             .unwrap_or_else(|| (page_url.to_string(), page_url.to_string()));

@@ -336,6 +336,7 @@ fn parse_results(body: &str, strip_russian: bool) -> Result<Vec<Release>> {
                 query_arg(href, "t").unwrap_or_default()
             ),
             source_url: Some(join_forum_path(href)),
+            comments: None,
         });
     }
 

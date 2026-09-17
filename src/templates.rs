@@ -101,10 +101,22 @@ pub struct IndexerSettings {
     pub extra_entries: Vec<SettingEntry>,
 }
 
+/// One environment-variable-backed setting, shown read-only: these are
+/// read from the process environment at startup and cannot be changed
+/// from the web UI, so the page reports them rather than offering a
+/// control that would lie about taking effect.
+pub struct EnvSetting {
+    pub name: &'static str,
+    pub value: String,
+    pub is_default: bool,
+    pub help: &'static str,
+}
+
 #[derive(Template)]
 #[template(path = "settings.html")]
 pub struct SettingsTemplate {
     pub indexers: Vec<IndexerSettings>,
+    pub env: Vec<EnvSetting>,
 }
 
 /// The tiny fragment returned to an htmx-driven field save -- just the
@@ -217,9 +229,36 @@ pub struct TorrentDetailTemplate {
     pub name: String,
     pub source_url: Option<String>,
     pub finished: bool,
+    /// Deliberately stopped (paused), as opposed to errored or running.
+    pub paused: bool,
     pub progress_percent: u32,
     pub seeded_for_minutes: Option<u64>,
+    pub download_speed: String,
+    pub upload_speed: String,
+    /// Achieved upload/download ratio, pre-formatted, or `None` when the
+    /// size isn't known yet.
+    pub ratio: Option<String>,
+    pub total_size: String,
+    pub uploaded: String,
+    /// Human-readable description of the configured seed limit, or
+    /// "none" -- a sentence, since time and ratio limits can both apply.
+    pub seed_limit: String,
+    /// Current limit values for the form inputs (`"0"` = unset).
+    pub seed_minutes: String,
+    pub seed_ratio: String,
+    /// Poster and blurb from TMDB, when a key is configured and there's a
+    /// match. `None` hides the block entirely.
+    pub movie: Option<crate::tmdb::MovieInfo>,
     pub files: Vec<FileEntry>,
+}
+
+impl TorrentDetailTemplate {
+    pub fn ratio_at_least_one(&self) -> bool {
+        self.ratio
+            .as_deref()
+            .and_then(|r| r.parse::<f64>().ok())
+            .is_some_and(|r| r >= 1.0)
+    }
 }
 
 pub struct TorrentRow {
@@ -230,12 +269,31 @@ pub struct TorrentRow {
     pub progress_percent: u32,
     pub total_size: String,
     pub uploaded: String,
+    /// Pre-formatted rates (`"1.2 MB/s"`, or an em dash when idle).
+    pub download_speed: String,
+    pub upload_speed: String,
+    /// Upload/download ratio actually reached so far, pre-formatted
+    /// (`"1.42"`), or `None` while the size is still unknown -- distinct
+    /// from `seed_ratio`, which is the *limit* that stops seeding.
+    pub ratio: Option<String>,
     /// Empty string when no limit of that kind is set (keeps the template
     /// dead simple: just print the field, no `{% if %}` needed for the
     /// input's `value` attribute).
     pub seed_minutes: String,
     pub seed_ratio: String,
     pub seeded_for_minutes: Option<u64>,
+}
+
+impl TorrentRow {
+    /// Whether the achieved ratio has reached 1.0, i.e. as much uploaded
+    /// as downloaded -- precomputed because Askama can't compare an
+    /// `Option<String>` against a number inline.
+    pub fn ratio_at_least_one(&self) -> bool {
+        self.ratio
+            .as_deref()
+            .and_then(|r| r.parse::<f64>().ok())
+            .is_some_and(|r| r >= 1.0)
+    }
 }
 
 #[derive(Template)]

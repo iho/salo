@@ -24,6 +24,12 @@
             {% if let Some(url) = r.source_url %}
               <a href="{{ url }}" target="_blank" rel="noopener noreferrer"
                  title="Open this release on {{ r.indexer }}">{{ r.title }} &#8599;</a>
+              {% if let Some(c) = r.comments %}
+                {# Straight to the comments, whose count is the real
+                   signal of whether a release is worth reading about. #}
+                <a class="comments" href="{{ c.url }}" target="_blank" rel="noopener noreferrer"
+                  title="{{ c.count }} comments on {{ r.indexer }}">&#128172; {{ c.count }}</a>
+              {% endif %}
             {% else %}
               {{ r.title }}
             {% endif %}

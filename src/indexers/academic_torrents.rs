@@ -70,6 +70,7 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Release
             // Deterministic: the feed's own <link>/<guid> for each item is
             // exactly this shape.
             source_url: Some(format!("https://academictorrents.com/details/{}", e.info_hash)),
+            comments: None,
         })
         .collect())
 }

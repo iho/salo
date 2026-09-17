@@ -9,21 +9,97 @@
   <link rel="stylesheet" href="/theme.css">
   <style>
     video, audio { width: 100%; margin-top: 0.5rem; }
+    table.stats { border-collapse: collapse; margin: 0.5rem 0 1.5rem; }
+    table.stats th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.15rem 0.75rem 0.15rem 0; }
+    table.stats td { padding: 0.15rem 1.5rem 0.15rem 0; }
+    td.speed { white-space: nowrap; }
+    .movie { display: flex; gap: 1rem; align-items: flex-start; margin: 0.5rem 0 1.5rem; }
+    .movie img { width: 154px; border-radius: 6px; flex: 0 0 auto; }
+    .movie h2 { margin: 0 0 0.25rem; font-size: 1.15rem; }
+    .movie .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 0.5rem; }
+    .movie p { margin: 0; }
+    .badge { border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; font-size: 0.8rem; }
+    /* Poster picker: alternatives as small clickable thumbnails. */
+    details.poster-picker { margin-top: 0.75rem; }
+    details.poster-picker summary { cursor: pointer; color: var(--primary); font-size: 0.9rem; }
+    details.poster-picker summary .count { color: var(--muted); }
+    .poster-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
+    .poster-grid form { margin: 0; }
+    .poster-grid button { padding: 0; border: 1px solid var(--border); border-radius: 6px;
+                          background: var(--input-bg); color: var(--text); cursor: pointer;
+                          width: 92px; overflow: hidden; display: block; text-align: left; }
+    .poster-grid button:hover { border-color: var(--primary); }
+    .poster-grid img { width: 100%; display: block; }
+    .poster-grid span { display: block; font-size: 0.7rem; line-height: 1.2; padding: 0.2rem 0.3rem; }
+    .poster-grid em { color: var(--muted); font-style: normal; }
+    details.poster-picker form.reset { margin-top: 0.6rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; margin-bottom: 1.5rem; }
+    .actions form { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0; }
+    .actions input[type="number"] { width: 5rem; }
+    fieldset { border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; margin: 0; }
+    legend { padding: 0 0.35rem; color: var(--muted); font-size: 0.85rem; }
     @media (max-width: 600px) {
       table { display: block; overflow-x: auto; }
+      .movie { flex-direction: column; }
     }
   </style>
 </head>
 <body>
-  <p><a href="/">&laquo; back to search</a> &middot; <a href="/torrents">manage torrents</a></p>
+  <p><a href="/">&laquo; back to search</a> &middot; <a href="/torrents">manage torrents</a> &middot; <a href="/stored">stored</a></p>
   <h1>{{ name }}</h1>
-  <p><code>{{ info_hash }}</code></p>
+
+  {% if let Some(m) = movie %}
+    <div class="movie">
+      <img src="{{ m.poster_url }}" alt="Poster for {{ m.title }}" loading="lazy"
+           referrerpolicy="no-referrer">
+      <div>
+        <h2>{{ m.title }}</h2>
+        <div class="meta">
+          <span class="badge">{{ m.kind }}</span>
+          {% if !m.year.is_empty() %}{{ m.year }} &middot; {% endif %}
+          {% if !m.rating.is_empty() %}★ {{ m.rating }} &middot; {% endif %}
+          <a href="{{ m.page_url }}" target="_blank" rel="noopener noreferrer">TMDB &raquo;</a>
+        </div>
+        {% if !m.overview.is_empty() %}<p>{{ m.overview }}</p>{% endif %}
+
+        {# The right match is often not the first one, so the other
+           candidates are switchable. Each is a one-button form so the
+           choice needs no JS and survives without it. #}
+        {% if !m.alternatives.is_empty() %}
+          <details class="poster-picker">
+            <summary>Not this one? Pick a different poster
+              <span class="count">({{ m.alternatives.len() }})</span></summary>
+            <div class="poster-grid">
+              {% for p in m.alternatives %}
+                <form method="post" action="/torrents/poster">
+                  <input type="hidden" name="info_hash" value="{{ info_hash }}">
+                  <input type="hidden" name="poster_url" value="{{ p.url }}">
+                  <button type="submit" title="{{ p.title }}{% if !p.year.is_empty() %} ({{ p.year }}){% endif %}">
+                    <img src="{{ p.url }}" alt="{{ p.title }}" loading="lazy"
+                         referrerpolicy="no-referrer">
+                    <span>{{ p.title }}{% if !p.year.is_empty() %} <em>{{ p.year }}</em>{% endif %}</span>
+                  </button>
+                </form>
+              {% endfor %}
+            </div>
+            <form method="post" action="/torrents/poster" class="reset">
+              <input type="hidden" name="info_hash" value="{{ info_hash }}">
+              <input type="hidden" name="poster_url" value="">
+              <button type="submit">Reset to automatic</button>
+            </form>
+          </details>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
 
   <p>
     {% if let Some(url) = source_url %}
       <a href="{{ url }}">View on original tracker &raquo;</a><br>
     {% endif %}
-    {% if finished %}
+    {% if paused %}
+      <strong>Paused</strong> -- not transferring.
+    {% else if finished %}
       Finished downloading.
       {% if let Some(m) = seeded_for_minutes %}
         Seeding for {{ m }} minutes.
@@ -32,6 +108,69 @@
       Downloading: {{ progress_percent }}% complete.
     {% endif %}
   </p>
+
+  <table class="stats">
+    <tbody>
+      <tr>
+        <th>Down</th><td class="speed">{{ download_speed }}</td>
+        <th>Up</th><td class="speed">{{ upload_speed }}</td>
+        <th>Ratio</th>
+        <td>
+          {% match ratio %}
+            {% when Some with (r) %}<span class="{% if ratio_at_least_one() %}ratio-good{% endif %}">{{ r }}</span>
+            {% when None %}&mdash;
+          {% endmatch %}
+        </td>
+      </tr>
+      <tr>
+        <th>Size</th><td>{{ total_size }}</td>
+        <th>Uploaded</th><td>{{ uploaded }}</td>
+        <th>Seed limit</th>
+        <td>{{ seed_limit }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  {# Every action posts to the same handlers the torrents list uses, with
+     `return_to=detail` so the browser lands back here and sees the result
+     instead of being bounced to the list. #}
+  <div class="actions">
+    <form method="post" action="/torrents/pause">
+      <input type="hidden" name="info_hash" value="{{ info_hash }}">
+      <input type="hidden" name="return_to" value="detail">
+      {% if paused %}
+        <button type="submit" name="paused" value="0">Resume</button>
+      {% else %}
+        <button type="submit" name="paused" value="1">
+          {% if finished %}Stop seeding{% else %}Pause download{% endif %}
+        </button>
+      {% endif %}
+    </form>
+
+    <form method="post" action="/torrents/seed-limit">
+      <input type="hidden" name="info_hash" value="{{ info_hash }}">
+      <input type="hidden" name="return_to" value="detail">
+      <fieldset>
+        <legend>Seed until</legend>
+        <label title="minutes of seeding, 0 = indefinitely">
+          <input type="number" name="seed_minutes" min="0" value="{{ seed_minutes }}"> min
+        </label>
+        <label title="upload/download ratio, 0 = indefinitely">
+          or ratio <input type="number" name="seed_ratio" min="0" step="0.1" value="{{ seed_ratio }}">
+        </label>
+        <button type="submit">Set</button>
+      </fieldset>
+    </form>
+
+    <form method="post" action="/torrents/delete">
+      <input type="hidden" name="info_hash" value="{{ info_hash }}">
+      <input type="hidden" name="return_to" value="detail">
+      <label><input type="checkbox" name="delete_files" value="1"> also delete files</label>
+      <button type="submit">Remove torrent</button>
+    </form>
+  </div>
+
+  <p class="hint"><code>{{ info_hash }}</code></p>
 
   <table>
     <thead>

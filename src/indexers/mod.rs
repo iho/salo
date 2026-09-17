@@ -61,6 +61,34 @@ pub enum SettingFieldKind {
     Checkbox,
 }
 
+/// Resolves an href scraped from a page into an absolute URL.
+///
+/// Sites are inconsistent about this -- some serve root-relative hrefs
+/// (`/torrent/1/x`), some absolute (`https://host/torrent/1/x`) -- and
+/// naively prefixing a base URL onto the latter produces garbage like
+/// `https://hosthttps://host/torrent/1/x`. That looks like a dead tracker
+/// link rather than a code error, so this handles every shape:
+///
+///   `https://…` / `http://…` -> unchanged
+///   `//host/path`            -> `https://host/path` (protocol-relative)
+///   `/path`                  -> `<base>/path`
+///   `path`                   -> `<base>/path`
+pub fn absolute_url(base: &str, href: &str) -> String {
+    let href = href.trim();
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    if let Some(rest) = href.strip_prefix("//") {
+        return format!("https://{rest}");
+    }
+    // `trim_end_matches` on the base and `trim_start_matches` on the href
+    // together avoid a doubled slash for root-relative hrefs
+    // ("https://nyaa.si" + "/view/1" -> "https://nyaa.si/view/1").
+    let base = base.trim_end_matches('/');
+    let href = href.trim_start_matches('/');
+    format!("{base}/{href}")
+}
+
 /// A single parsed release row from an indexer's search results page.
 #[derive(Debug, Clone, Serialize)]
 pub struct Release {
@@ -74,6 +102,19 @@ pub struct Release {
     /// exposes one -- carried through to the torrent detail page as
     /// "view on `<indexer>`", separate from the magnet/swarm itself.
     pub source_url: Option<String>,
+    /// How many comments the release has on its tracker, and where to read
+    /// them, when the indexer exposes it (nyaa does: its title cell
+    /// carries a `Comments` link with the count). `None` for indexers that
+    /// don't publish it -- it is a nicety, not something to fake with 0.
+    pub comments: Option<CommentInfo>,
+}
+
+/// Comment count for a release, plus the page (anchored at the comments)
+/// where they can be read.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommentInfo {
+    pub count: u32,
+    pub url: String,
 }
 
 /// Every indexer compiled into this binary. Static dispatch (a plain enum)
@@ -185,10 +226,16 @@ pub fn names() -> Vec<&'static str> {
     Registered::ALL.iter().map(Registered::name).collect()
 }
 
-/// The settings fields a named indexer declares (empty for public
-/// indexers that need no configuration) -- what the settings page
-/// renders labeled inputs from.
+/// The declared settings fields for a settings section.
+///
+/// Almost every section is an indexer. `tmdb` is the exception: it is a
+/// pseudo-section (see `crate::tmdb::SECTION`) holding the metadata API
+/// key, deliberately not an indexer so it never appears in the tracker
+/// picker or gets searched.
 pub fn settings_fields(name: &str) -> Vec<SettingField> {
+    if name == crate::tmdb::SECTION {
+        return vec![crate::tmdb::settings_field()];
+    }
     Registered::ALL
         .iter()
         .find(|i| i.name() == name)
@@ -329,4 +376,71 @@ pub fn format_size(bytes: u64) -> String {
         unit += 1;
     }
     format!("{size:.1} {}", UNITS[unit])
+}
+
+/// Formats a byte-per-second rate for display (`"1.2 MB/s"`).
+///
+/// Distinct from [`format_size`] because a rate of zero is worth showing
+/// as an em dash rather than "0.0 B/s" -- on the torrents page a stalled
+/// torrent should read as "not moving", not as a suspiciously precise
+/// measurement of nothing.
+pub fn format_speed(bytes_per_sec: u64) -> String {
+    if bytes_per_sec == 0 {
+        return "—".to_string();
+    }
+    format!("{}/s", format_size(bytes_per_sec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_url_handles_every_href_shape_a_site_serves() {
+        // Absolute: the case that broke TPB -- prefixing this again
+        // produced "https://thepiratebay.xyzhttps://thepiratebay.xyz/…".
+        assert_eq!(
+            absolute_url("https://tpb.example", "https://tpb.example/torrent/1/x"),
+            "https://tpb.example/torrent/1/x"
+        );
+        assert_eq!(
+            absolute_url("https://tpb.example", "http://other.example/a"),
+            "http://other.example/a"
+        );
+        // Root-relative (what nyaa serves).
+        assert_eq!(
+            absolute_url("https://nyaa.si", "/view/2157520"),
+            "https://nyaa.si/view/2157520"
+        );
+        // Bare relative, and a trailing slash on the base must not double up.
+        assert_eq!(
+            absolute_url("https://nyaa.si/", "view/1"),
+            "https://nyaa.si/view/1"
+        );
+        // Protocol-relative.
+        assert_eq!(
+            absolute_url("https://x.example", "//cdn.example/a"),
+            "https://cdn.example/a"
+        );
+    }
+
+    #[test]
+    fn absolute_url_never_doubles_a_scheme() {
+        // The invariant worth asserting directly: whatever goes in, the
+        // result has exactly one scheme.
+        for href in [
+            "https://a.example/p",
+            "http://a.example/p",
+            "/p",
+            "p",
+            "//a.example/p",
+        ] {
+            let out = absolute_url("https://a.example", href);
+            assert_eq!(
+                out.matches("https://").count() + out.matches("http://").count(),
+                1,
+                "href {href:?} -> {out}"
+            );
+        }
+    }
 }

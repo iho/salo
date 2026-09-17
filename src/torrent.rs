@@ -29,6 +29,92 @@ pub fn is_audio_file(name: &str) -> bool {
     AUDIO_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
 }
 
+/// The display name carried by an add request, when it has one.
+///
+/// Only a magnet URL carries this (`dn=`); a `.torrent` document's name
+/// lives inside its metadata, which isn't available yet at this point.
+fn add_torrent_name(source: &AddTorrent<'_>) -> Option<String> {
+    let AddTorrent::Url(url) = source else {
+        return None;
+    };
+    let url = url.as_ref();
+    // `dn` is the magnet's display-name parameter. It is percent-encoded
+    // in the wild, so decode rather than using the raw slice -- a
+    // `%20`-laden folder name is worse than useless.
+    let query = url.split_once('?')?.1;
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("dn="))
+        .and_then(percent_decode)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+/// Minimal percent-decoding for a magnet name (`%20` -> space).
+///
+/// Deliberately not a full URL decoder: this project's `reqwest` has no
+/// helper exposed for it and a magnet's `dn` only ever needs `%XX` and
+/// `+` handling. Invalid escapes are left as-is rather than dropped.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Makes a torrent name safe to use as a single path component.
+///
+/// librqbit validates the subfolder IT derives from metadata
+/// (`check_valid` rejects path separators), but it does **not** validate a
+/// `sub_folder` passed in by the caller -- so a hostile magnet `dn` of
+/// `../../etc` would escape the download root through this path. Every
+/// separator and control character is folded to `_`, and the result can
+/// never be `.` or `..`, so the folder is always exactly one component.
+fn sanitize_subfolder(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '\0' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    // Trim dots/spaces from both ends: `..`, `.`, and names Windows
+    // refuses to create.
+    let trimmed = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if trimmed.is_empty() {
+        return "_".to_string();
+    }
+    // Windows caps a path component at 255 chars; leave room for a
+    // deduplicating suffix librqbit may add.
+    trimmed.chars().take(150).collect()
+}
+
 /// An auto-remove-after-seeding rule for one torrent: once it's finished
 /// downloading, remove it (but keep the downloaded files) once *either*
 /// configured condition is met -- it's seeded for `seed_for`, or its
@@ -86,10 +172,38 @@ pub struct TorrentSummary {
     pub progress_bytes: u64,
     pub total_bytes: u64,
     pub uploaded_bytes: u64,
+    /// Current rates, in bytes per second. 0 when the torrent isn't
+    /// running (`stats.live` is `None` once a torrent is stopped/errored).
+    pub download_speed: u64,
+    pub upload_speed: u64,
+    /// True when the torrent is deliberately paused (not errored).
+    pub paused: bool,
     pub seed_minutes: Option<u64>,
     pub seed_ratio: Option<f64>,
     pub seeded_for_minutes: Option<u64>,
     pub source_url: Option<String>,
+}
+
+impl TorrentSummary {
+    /// Upload/download ratio reached so far -- "seed coefficient", the
+    /// number a private tracker judges you on. Uploaded over total size
+    /// (not over bytes *fetched*): for a torrent that started from
+    /// nothing on disk the two are the same, and using total size keeps
+    /// the figure stable while the download is still in progress.
+    /// `None` until the size is known, since a ratio against 0 is
+    /// meaningless rather than infinite.
+    pub fn ratio(&self) -> Option<f64> {
+        (self.total_bytes > 0).then(|| self.uploaded_bytes as f64 / self.total_bytes as f64)
+    }
+
+    /// How far along the *download* is, as a percentage.
+    pub fn progress_percent(&self) -> u32 {
+        if self.total_bytes == 0 {
+            return 0;
+        }
+        let pct = self.progress_bytes.saturating_mul(100) / self.total_bytes;
+        u32::try_from(pct.min(100)).unwrap_or(100)
+    }
 }
 
 impl TorrentEngine {
@@ -193,7 +307,20 @@ impl TorrentEngine {
     /// file's bytes concurrently with that download, sequentially from
     /// wherever you start reading.
     pub async fn add(&self, magnet: &str, output_folder: Option<String>) -> Result<AddedTorrent> {
-        self.add_torrent(AddTorrent::from_url(magnet), output_folder, false)
+        self.add_torrent(AddTorrent::from_url(magnet), output_folder, None, false, false)
+            .await
+    }
+
+    /// [`add`] with the torrent's files placed in a subfolder named after
+    /// the torrent (inside the session's download root). `name` is the
+    /// release title as the user saw it, which is preferred over the
+    /// magnet's own `dn` -- that is often a truncated or decorated form.
+    pub async fn add_in_subfolder(
+        &self,
+        magnet: &str,
+        name: Option<String>,
+    ) -> Result<AddedTorrent> {
+        self.add_torrent(AddTorrent::from_url(magnet), None, name, true, false)
             .await
     }
 
@@ -206,31 +333,81 @@ impl TorrentEngine {
     /// allows overwrite and lets the session validate the existing data --
     /// it re-checks the pieces already present rather than re-downloading
     /// them.
+    ///
+    /// Reattaching with the torrent's *stored* output folder also lands on
+    /// the same directory the download used, whether or not that was a
+    /// per-torrent subfolder -- the stored path is already resolved, so no
+    /// subfolder flag is needed here.
     pub async fn reattach(&self, magnet: &str, output_folder: Option<String>) -> Result<AddedTorrent> {
-        self.add_torrent(AddTorrent::from_url(magnet), output_folder, true)
-            .await
+        self.add_torrent(
+            AddTorrent::from_url(magnet),
+            output_folder,
+            None,
+            false,
+            true,
+        )
+        .await
     }
 
     /// Same as [`add`] for a .torrent document already fetched into
     /// memory -- for login-walled indexers whose download URLs need an
     /// authenticated session that librqbit's own URL fetch can't carry.
+    ///
+    /// `name` is the release name, used to name the per-torrent subfolder
+    /// when `subfolder` is set: a .torrent's own name lives in its
+    /// metadata, which isn't parsed yet at this point.
     pub async fn add_bytes(
         &self,
         bytes: bytes::Bytes,
         output_folder: Option<String>,
+        name: Option<String>,
+        subfolder: bool,
     ) -> Result<AddedTorrent> {
-        self.add_torrent(AddTorrent::from_bytes(bytes), output_folder, false)
-            .await
+        self.add_torrent(
+            AddTorrent::from_bytes(bytes),
+            output_folder,
+            name,
+            subfolder,
+            false,
+        )
+        .await
     }
 
     async fn add_torrent(
         &self,
         source: AddTorrent<'_>,
         output_folder: Option<String>,
+        // Explicit release name, for a source whose name isn't in the
+        // source itself (a .torrent document's lives in its metadata).
+        name: Option<String>,
+        // Put the torrent's files in their own subfolder named after the
+        // torrent, instead of directly in `output_folder`.
+        subfolder_by_name: bool,
         allow_overwrite: bool,
     ) -> Result<AddedTorrent> {
+        // `sub_folder` and `output_folder` are mutually exclusive in
+        // librqbit -- it bails with "you can't provide both".
+        //
+        // When a name is knowable up front (a magnet's `dn`, or the
+        // caller's `name`), pass it as `sub_folder` so even a single-file
+        // torrent gets its own folder. With `sub_folder: None` librqbit
+        // still derives a name-based subfolder from the metadata itself --
+        // but only for multi-file torrents, so a single-file one would
+        // land flat.
+        let sub_folder = if subfolder_by_name {
+            name.or_else(|| add_torrent_name(&source))
+                .map(|name| sanitize_subfolder(&name))
+        } else {
+            None
+        };
+
         let opts = AddTorrentOptions {
-            output_folder,
+            output_folder: if subfolder_by_name {
+                None
+            } else {
+                output_folder
+            },
+            sub_folder,
             overwrite: allow_overwrite,
             ..Default::default()
         };
@@ -453,6 +630,37 @@ impl TorrentEngine {
         self.list().into_iter().find(|t| t.info_hash == info_hash)
     }
 
+    /// Stops a torrent transferring, keeping everything: the files, the
+    /// seed policy, and its place in the list. It can be resumed from the
+    /// same page.
+    ///
+    /// Both directions go through `librqbit`'s session-level `pause`/
+    /// `unpause` (not the bare handle method) so the dependency also
+    /// updates its own persistence metadata -- otherwise a paused torrent
+    /// would silently restart transferring after a salo restart.
+    pub async fn set_paused(&self, info_hash: &str, paused: bool) -> Result<()> {
+        let idx = TorrentIdOrHash::parse(info_hash).context("invalid info hash")?;
+        let handle = self
+            .session
+            .get(idx)
+            .with_context(|| format!("torrent {info_hash} is not in the session"))?;
+        if paused {
+            self.session
+                .pause(&handle)
+                .await
+                .context("failed to pause torrent")?;
+        } else {
+            self.session
+                .unpause(&handle)
+                .await
+                .context("failed to resume torrent")?;
+        }
+        if let Err(err) = self.store.set_paused(info_hash, paused) {
+            tracing::warn!(error = ?err, "could not persist paused state");
+        }
+        Ok(())
+    }
+
     /// Set (or, with both `None`, clear) how this torrent should be
     /// auto-removed once it's done seeding -- after `minutes` of seeding,
     /// once its upload/download ratio reaches `ratio`, or whichever of
@@ -503,6 +711,14 @@ impl TorrentEngine {
                     progress_bytes: stats.progress_bytes,
                     total_bytes: stats.total_bytes,
                     uploaded_bytes: stats.uploaded_bytes,
+                    // `live` is absent for a stopped/errored torrent, so
+                    // speeds read as 0 rather than the last known rate.
+                    download_speed: stats
+                        .live
+                        .as_ref()
+                        .map_or(0, |l| l.download_speed.as_bytes()),
+                    upload_speed: stats.live.as_ref().map_or(0, |l| l.upload_speed.as_bytes()),
+                    paused: matches!(stats.state, librqbit::TorrentStatsState::Paused),
                     seed_minutes: policy.and_then(|p| p.seed_for).map(|d| d.as_secs() / 60),
                     seed_ratio: policy.and_then(|p| p.seed_ratio),
                     seeded_for_minutes: policy
@@ -588,5 +804,79 @@ impl TorrentEngine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_magnet_name_is_decoded_from_dn() {
+        let src = AddTorrent::from_url(
+            "magnet:?xt=urn:btih:abc&dn=Django%20Unchained%202012&tr=udp%3A%2F%2Fx",
+        );
+        assert_eq!(
+            add_torrent_name(&src).as_deref(),
+            Some("Django Unchained 2012")
+        );
+    }
+
+    #[test]
+    fn a_magnet_without_dn_has_no_name() {
+        let src = AddTorrent::from_url("magnet:?xt=urn:btih:abc");
+        assert_eq!(add_torrent_name(&src), None);
+        // And a .torrent document never carries one.
+        let src = AddTorrent::from_bytes(bytes::Bytes::from_static(b"d4:infod"));
+        assert_eq!(add_torrent_name(&src), None);
+    }
+
+    #[test]
+    fn percent_decoding_handles_escapes_and_leaves_invalid_ones_alone() {
+        assert_eq!(percent_decode("%5BAnoZu%5D%20One%20Piece").as_deref(), Some("[AnoZu] One Piece"));
+        assert_eq!(percent_decode("plain+name").as_deref(), Some("plain name"));
+        // A stray % that isn't an escape must survive rather than be eaten.
+        assert_eq!(percent_decode("100%%").as_deref(), Some("100%%"));
+        assert_eq!(percent_decode("t%C3%A9l%C3%A9charger").as_deref(), Some("télécharger"));
+    }
+
+    #[test]
+    fn a_subfolder_name_can_never_escape_the_download_root() {
+        // The whole point of the sanitizer: librqbit does NOT validate a
+        // caller-supplied sub_folder, so traversal must be neutralised here.
+        for hostile in [
+            "../../etc/passwd",
+            "..\\..\\windows",
+            "/absolute/path",
+            "a/../../../b",
+            "..",
+            ".",
+            "  ..  ",
+        ] {
+            let safe = sanitize_subfolder(hostile);
+            assert!(
+                !safe.contains('/') && !safe.contains('\\'),
+                "{hostile:?} -> {safe:?} still has a separator"
+            );
+            assert_ne!(safe, "..", "{hostile:?} stayed as a parent ref");
+            assert_ne!(safe, ".", "{hostile:?} stayed as a current-dir ref");
+            assert!(!safe.is_empty(), "{hostile:?} became empty");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_release_name_survives_intact() {
+        // Sanitizing must not mangle the common case.
+        assert_eq!(
+            sanitize_subfolder("Django Unchained 2012 1080p BluRay"),
+            "Django Unchained 2012 1080p BluRay"
+        );
+        assert_eq!(sanitize_subfolder("[AnoZu] One Piece"), "[AnoZu] One Piece");
+    }
+
+    #[test]
+    fn a_very_long_name_is_truncated_for_the_filesystem() {
+        let long = "x".repeat(400);
+        assert_eq!(sanitize_subfolder(&long).chars().count(), 150);
     }
 }

@@ -85,6 +85,7 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Release
                 },
                 magnet: format!("https://archive.org/download/{id}/{id}_archive.torrent"),
                 source_url: Some(format!("https://archive.org/details/{id}")),
+                comments: None,
             }
         })
         .collect())

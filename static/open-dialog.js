@@ -22,7 +22,9 @@ function openDialogFrom(button) {
   body.replaceChildren(template.content.cloneNode(true));
 
   var form = body.querySelector('form.open-form');
-  ['magnet', 'indexer', 'source_url'].forEach(function (name) {
+  // `title` travels too: it names the per-torrent subfolder when the
+  // "own folder" box is ticked for a login-walled indexer's .torrent.
+  ['magnet', 'indexer', 'source_url', 'title'].forEach(function (name) {
     var value = row.querySelector('input[name="' + name + '"]');
     if (value) {
       var hidden = document.createElement('input');

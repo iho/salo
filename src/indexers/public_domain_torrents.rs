@@ -79,6 +79,7 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Release
                 e.base_name
             ),
             source_url: e.detail_url.clone(),
+            comments: None,
         })
         .collect())
 }

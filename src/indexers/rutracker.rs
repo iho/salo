@@ -397,6 +397,7 @@ fn parse_results(body: &str, strip_russian: bool, move_tags: bool) -> Result<Vec
             // `download_torrent` below.
             magnet: format!("{BASE_URL}forum/{download_href}"),
             source_url: Some(format!("{BASE_URL}forum/{href}")),
+            comments: None,
         });
     }
 

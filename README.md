@@ -24,11 +24,44 @@ Then open <http://localhost:3000>.
 
 ### Environment variables
 
-| Variable       | Default        | Meaning                                    |
-|----------------|----------------|---------------------------------------------|
-| `BIND_ADDR`    | `0.0.0.0:3000` | Address the HTTP server listens on          |
-| `DOWNLOAD_DIR` | `./downloads`  | Default directory torrents save into        |
-| `DB_PATH`      | `./salo.db`    | SQLite file for per-indexer settings        |
+Read at startup; the settings page reports the values in effect (it
+cannot change them, since a new value would need a restart).
+
+| Variable         | Default        | Meaning                                    |
+|------------------|----------------|---------------------------------------------|
+| `BIND_ADDR`      | `0.0.0.0:3000` | Address the HTTP server listens on          |
+| `DOWNLOAD_DIR`   | `./downloads`  | Default directory torrents save into        |
+| `DB_PATH`        | `./salo.db`    | SQLite file for per-indexer settings        |
+| `WORKER_THREADS` | `2`            | Tokio worker threads (see `src/main.rs`)    |
+
+## Memory usage vs. the traditional stack
+
+A typical self-hosted setup runs Sonarr, Radarr, Prowlarr, and a torrent
+client (usually qBittorrent) as separate long-running services — each its
+own process/container, its own HTTP server, its own database, its own
+.NET or Mono runtime for the `*arr` apps. `salo` is one process, one
+embedded SQLite file, one embedded BitTorrent client.
+
+There's no single controlled benchmark running all of these side by side
+on identical hardware with identical libraries, so treat the numbers
+below as what's actually documented/reported, not a lab measurement:
+
+| Component | Reported RAM | Source |
+|---|---|---|
+| Sonarr + Radarr, idle, small library | ~200–300 MB combined | [Sonarr forums: "What is normal memory usage for Sonarr?"](https://forums.sonarr.tv/t/what-is-normal-memory-usage-for-sonarr-normal-for-it-to-keep-slowly-growing/19384) |
+| Radarr, large library (~600 movies) | ~1.6 GB | [Radarr/Radarr#158 "High memory usage by radarr"](https://github.com/Radarr/Radarr/issues/158) |
+| Sonarr, large library, reported growth over time | 600 MB+ and climbing | [Sonarr forums: "Steady Memory Increase"](https://forums.sonarr.tv/t/steady-memory-increase/20463) |
+| Prowlarr + rest of the `*arr`/Docker stack | vendor guidance: 2 GB minimum, 4 GB+ recommended | [Prowlarr hardware requirements](https://shop.zimaspace.com/pages/prowlarr-hardware-requirements) |
+| qBittorrent | no fixed minimum published; multiple open issues about unbounded growth | [qBittorrent#16612](https://github.com/qbittorrent/qBittorrent/issues/16612), [qBittorrent#13699](https://github.com/qbittorrent/qBittorrent/issues/13699) |
+| **salo, idle** (measured on this repo) | **~11.6 MB**, one process | `ps -o rss` right after startup, no torrents added |
+
+Put together, a working `*arr` + torrent-client stack realistically lands
+somewhere in the **1–2+ GB** range once you count all four services and a
+real library, before the host OS or anything else running on the same
+box. `salo` replacing that whole stack with one binary idling at ~11.6 MB
+is the difference between needing a dedicated home-server box and running
+comfortably on whatever's already idle — a Raspberry Pi, a $5 VPS, a spare
+router with USB storage.
 
 ## What it does
 
@@ -59,8 +92,37 @@ Then open <http://localhost:3000>.
   to disk in the background. HTTP `Range` is fully supported (video
   seeking, resumable downloads).
 - **Torrent management** (`/torrents`) — every active torrent, its
-  progress, save location, and seed limit, with per-torrent detail pages
+  progress, live download/upload rates, bytes uploaded, and achieved
+  upload/download **ratio** (green once it reaches 1.0), save location,
+  and seed limit, with per-torrent detail pages
   (`/torrents/<info_hash>`) linking back to the original tracker listing.
+  The rates refresh in place every 2s from `/torrents/stats` (a JSON
+  endpoint, not an HTML swap) so a seed-limit field being typed into is
+  never rebuilt mid-edit.
+- **Per-torrent controls** (`/torrents/<info_hash>`) — the whole lifecycle
+  on the torrent's own page, so nothing requires going back to the list:
+  **pause/resume** (the "stop seeding" action — the torrent stays in the
+  session, files intact, and the paused state is persisted so a restart
+  doesn't silently resume it), **change the seed limit** (stop after N
+  minutes, at ratio R, or whichever comes first — `0` means indefinitely),
+  and **remove** the torrent, optionally deleting its files.
+- **Movie info** — with a TMDB API key set in `/settings`, a torrent's
+  detail page shows a poster, title, year, rating and plot summary for the
+  release it matched, with a link to its TMDB page. Without a key **no
+  request is made at all**; the block simply doesn't appear. The same
+  release name is resolved the way TorrServer resolves it — via a real
+  release-name parser (`torrent-name-parser`), because TMDB matches a
+  multi-word query essentially literally and any leftover release tag
+  (`1080p`, `x265`, `DDP5`) makes the search return *nothing*. The other
+  matches are offered as clickable poster alternatives, and the one you
+  pick is remembered; poster-less matches are skipped in favour of ones
+  with artwork.
+- **Comment counts** — a release's comment count on its tracker, linked
+  straight to the comments (nyaa publishes this; other indexers show
+  nothing rather than a fabricated `0`).
+- **Settings** (`/settings`) — per-indexer configuration, the optional
+  TMDB key, plus a read-only report of the environment variables in
+  effect. Indexers with nothing to configure aren't listed at all.
 - **Stored torrents** (`/stored`) — everything ever added, recorded in
   SQLite (`torrents` + `torrent_files`), including torrents no longer in
   the client. This is the restore path: it lists each torrent's files and
@@ -171,3 +233,41 @@ is torrent-only.
 - `src/config_store.rs` is a generic `(indexer, key) -> value` table, not
   anything credential-specific — any indexer module can read settings
   from it by its own name.
+- `src/env.rs` is the single source of truth for the environment
+  variables: the constants are what `main()` reads and what the settings
+  page reports, so the two cannot drift apart.
+- `src/tmdb.rs` is the only outbound metadata call in the project, and it
+  only happens when a key is configured. It deliberately mirrors
+  TorrServer's approach (the `torrserver/` submodule): a real release-name
+  parser rather than a junk-word list, and every poster candidate kept so
+  the user can switch.
+
+## Submodules
+
+- `Prowlarr/` — upstream Prowlarr, the source of the indexer definitions
+  salo ports (see `src/indexers/`). Reference only; nothing is built from
+  it.
+- `torrserver/` — [TorrServer](https://github.com/yourok/torrserver), a
+  Go torrent streaming server with a richer metadata UI. Added as a
+  reference for how it presents torrents (posters, titles), not built or
+  invoked by salo.
+
+  Its movie **posters and info come from TMDB** — the only metadata
+  provider it uses (no Kinopoisk/OMDb/IMDb call anywhere in the tree).
+  The relevant code:
+  - `web/src/components/Add/helpers.js` — `getMoviePosters()` calls
+    `GET {APIURL}/3/search/multi?api_key=…&query=…&language=…` and
+    renders `{ImageURL}/t/p/w300{poster_path}`. Before searching it
+    trims the torrent title with `shortenTitleForPosterSearch()` (cut at
+    `" ["`, `" ("`, `" / "`, then the first 4 words / 50 chars), because
+    long release names exceed what TMDB's search handles well.
+  - `server/settings/btsets.go` — the `TMDBConfig` defaults:
+    `APIURL=https://api.themoviedb.org`, `ImageURL=https://image.tmdb.org`,
+    plus `ImageURLRu=https://imagetmdb.com` (a TMDB image mirror used
+    when the language is Russian).
+  - `server/web/api/tmdb.go` + `GET /tmdb/settings` — the server hands
+    those four values to the browser, which does the TMDB calls itself;
+    the server never proxies TMDB.
+  - The API key is either the user's own (Settings → TMDB, or the
+    `tmdbkey` bot command) or a build-time `REACT_APP_TMDB_API_KEY`
+    baked in from CI, which the JS uses as a fallback.

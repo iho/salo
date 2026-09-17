@@ -95,6 +95,11 @@ impl TorrentStore {
             "ALTER TABLE torrents ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
             [],
         );
+        // Likewise for `paused` (added with the pause/resume feature).
+        let _ = conn.execute(
+            "ALTER TABLE torrents ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -218,6 +223,16 @@ impl TorrentStore {
         self.lock().execute(
             "UPDATE torrents SET source_url = ?2 WHERE info_hash = ?1",
             params![info_hash, url],
+        )?;
+        Ok(())
+    }
+
+    /// Records whether a torrent is deliberately paused, so the state
+    /// survives a restart rather than silently resuming.
+    pub fn set_paused(&self, info_hash: &str, paused: bool) -> Result<()> {
+        self.lock().execute(
+            "UPDATE torrents SET paused = ?2 WHERE info_hash = ?1",
+            params![info_hash, paused as i64],
         )?;
         Ok(())
     }

@@ -115,6 +115,7 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
                 size: release_size(&download.magnet, &download.res),
                 magnet: download.magnet.clone(),
                 source_url: Some(format!("https://subsplease.org/shows/{}/", info.show)),
+                comments: None,
             });
         }
     }

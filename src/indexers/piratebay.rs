@@ -103,10 +103,13 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
             continue;
         }
 
+        // The site serves this href ABSOLUTE (`https://thepiratebay.xyz/
+        // torrent/...`), so it must go through `absolute_url` -- naively
+        // prefixing BASE produced `https://thepiratebay.xyzhttps://...`.
         let source_url = link
             .value()
             .attr("href")
-            .map(|href| format!("{BASE_URL}{href}"));
+            .map(|href| super::absolute_url(BASE_URL, href));
 
         // The live page pads sizes with non-breaking spaces ("6.07 GiB"),
         // so normalize them or every size sorts/reads oddly.
@@ -122,6 +125,7 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
             size,
             magnet,
             source_url,
+            comments: None,
         });
     }
 
@@ -150,12 +154,15 @@ mod tests {
     use super::*;
 
     // Shaped after the live page's markup: the magnet lives in the 4th
-    // cell, wrapped in a <nobr>, with an &amp;-escaped href.
+    // cell, wrapped in a <nobr>, with an &amp;-escaped href. The title
+    // href is ABSOLUTE here because that is what the live site serves --
+    // an earlier version of this fixture used a root-relative href, which
+    // made the test pass while the real site produced a doubled URL.
     const SAMPLE: &str = r#"<html><body>
       <table id="searchResult"><tbody>
         <tr>
-          <td class="vertTh"><a href="/browse/303">Applications &gt; UNIX</a></td>
-          <td><a href="/torrent/82917197/ubuntu-26.04-desktop-amd64_iso">ubuntu-26.04-desktop-amd64.iso</a></td>
+          <td class="vertTh"><a href="https://thepiratebay.xyz/browse/303">Applications &gt; UNIX</a></td>
+          <td><a href="https://thepiratebay.xyz/torrent/82917197/ubuntu-26.04-desktop-amd64_iso" title="Details for ubuntu-26.04-desktop-amd64.iso">ubuntu-26.04-desktop-amd64.iso</a></td>
           <td>04-25&nbsp;16:35</td>
           <td><nobr><a href="magnet:?xt=urn:btih:DAFC8C076CA2F3ED376EEAE7C76A0D6BE2415C45&amp;dn=ubuntu-26.04-desktop-amd64.iso" title="Download this torrent using magnet"><img src="/static/img/icon-magnet.gif"></a></nobr></td>
           <td align="right">6.07&nbsp;GiB</td>
@@ -219,6 +226,21 @@ mod tests {
         let releases = parse_results(&body).expect("parses");
         assert_eq!(releases[0].seeders, 1234);
         assert_eq!(releases[0].size, "1 234 MiB");
+    }
+
+    #[test]
+    fn absolute_hrefs_are_not_prefixed_again() {
+        // The bug this guards: prefixing BASE onto an already-absolute
+        // href, which produced "https://thepiratebay.xyzhttps://…" -- a
+        // dead tracker link that no unit test caught, because the fixture
+        // had a relative href while the live site serves absolute ones.
+        let releases = parse_results(SAMPLE).expect("parses");
+        let url = releases[0].source_url.as_deref().unwrap_or_default();
+        assert!(
+            !url.contains("https://thepiratebay.xyzhttps://"),
+            "doubled scheme+host: {url}"
+        );
+        assert_eq!(url.matches("thepiratebay.xyz").count(), 1, "url: {url}");
     }
 
     #[test]

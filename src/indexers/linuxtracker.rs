@@ -114,6 +114,7 @@ fn parse_results(body: &str) -> Result<Vec<Release>> {
             size,
             magnet,
             source_url: Some(source_url),
+            comments: None,
         });
     }
 

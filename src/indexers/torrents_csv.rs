@@ -84,6 +84,7 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Release
                 "https://torrents-csv.com/search?q={}",
                 utf8_percent_encode(&t.name, NON_ALPHANUMERIC)
             )),
+            comments: None,
         })
         .collect())
 }

@@ -44,13 +44,40 @@
     blank to keep the stored value, use Remove to clear it.
   </p>
 
+  <section>
+    <h2>Environment</h2>
+    <p class="hint">
+      Read from the process environment at startup -- these are reported
+      here, not edited from this page, because changing one needs a
+      restart to take effect.
+    </p>
+    <table class="env">
+      <thead>
+        <tr><th>Variable</th><th>Value</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for e in env %}
+          <tr>
+            <td><code>{{ e.name }}</code></td>
+            <td><code>{{ e.value }}</code></td>
+            <td class="hint">
+              {% if e.is_default %}(default — not set in the environment){% endif %}
+              {{ e.help }}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  {# Indexers with nothing to configure are omitted entirely: an empty
+     section with a "no configuration needed" note is pure noise when
+     most indexers are public sites that need no account. #}
   {% for idx in indexers %}
+    {% if !idx.fields.is_empty() || !idx.extra_entries.is_empty() %}
     <section>
       <h2>{{ idx.name }}</h2>
-      {% if idx.fields.is_empty() && idx.extra_entries.is_empty() %}
-        <p class="hint">No configuration needed for this indexer.</p>
-      {% else %}
-        {% for field in idx.fields %}
+      {% for field in idx.fields %}
           {% if field.is_checkbox %}
             <form class="field" hx-post="/settings" hx-target="next .status" hx-swap="innerHTML">
               <input type="hidden" name="indexer" value="{{ idx.name }}">
@@ -82,7 +109,6 @@
           <span class="status"></span>
           <span class="help">{{ field.help }}</span>
         {% endfor %}
-      {% endif %}
 
       {% if !idx.extra_entries.is_empty() %}
         <h3 class="legacy">Other stored values</h3>
@@ -105,6 +131,7 @@
         </table>
       {% endif %}
     </section>
+    {% endif %}
   {% endfor %}
 
   <button id="theme-toggle" type="button">Theme</button>

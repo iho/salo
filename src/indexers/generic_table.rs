@@ -131,6 +131,7 @@ fn parse_results(body: &str, page_url: &reqwest::Url) -> Result<Vec<Release>> {
             size,
             magnet,
             source_url,
+            comments: None,
         });
     }
 
